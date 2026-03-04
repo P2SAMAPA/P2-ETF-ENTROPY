@@ -42,13 +42,13 @@ jobs:
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python train_models.py  # Separate Python file (cleaner)
+        run: python train_models.py
       
-      - name: Commit artifacts
+      - name: Commit artifacts to repo
         if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add artifacts/
-          git commit -m "Update model artifacts [$(date +%Y-%m-%d)]" || echo "No changes"
+          git commit -m "Add model artifacts [$(date +%Y-%m-%d)]" || echo "No changes to commit"
           git push || echo "Nothing to push"
