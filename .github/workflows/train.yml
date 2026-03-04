@@ -21,8 +21,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_PAT }}  # Use PAT for push permissions
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -46,30 +44,39 @@ jobs:
         run: |
           echo "Starting training..."
           python train_models.py
-          echo "Training complete. Checking artifacts..."
-          ls -la artifacts/ || echo "No artifacts folder!"
+          echo "Training complete."
       
-      - name: Commit and Push Artifacts
+      - name: Upload Artifacts to HuggingFace
+        if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -c "
+import os
+from huggingface_hub import HfApi
+api = HfApi(token=os.getenv('HF_TOKEN'))
+repo_id = 'P2SAMAPA/etf-entropy-dataset'
+
+# Upload each file individually
+artifact_path = 'artifacts'
+for file in os.listdir(artifact_path):
+    if file.endswith(('.pkl', '.json', '.npy')):
+        print(f'Uploading {file}...')
+        api.upload_file(
+            path_or_fileobj=f'{artifact_path}/{file}',
+            path_in_repo=f'models/{file}',
+            repo_id=repo_id,
+            repo_type='dataset'
+        )
+print('All artifacts uploaded to HF!')
+          "
+      
+      - name: Commit small files to GitHub
         if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          
-          # Check what's in artifacts
-          echo "Contents of artifacts/:"
-          ls -la artifacts/ || echo "Folder doesn't exist"
-          
-          # Stage all artifacts
-          git add -f artifacts/
-          
-          # Check status
-          git status
-          
-          # Commit if there are changes
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Add model artifacts [$(date +%Y-%m-%d)]"
-            git push
-            echo "Artifacts committed and pushed!"
-          fi
+          # Only commit small files (best_model.json)
+          git add artifacts/best_model.json
+          git commit -m "Update best model info [$(date +%Y-%m-%d)]" || echo "No changes"
+          git push || echo "Push failed, but HF upload succeeded"
