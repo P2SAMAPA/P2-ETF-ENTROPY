@@ -2,7 +2,7 @@ name: ETF Entropy Pipeline
 
 on:
   schedule:
-    # Daily at 00:30 UTC (after US market close, handles EST/EDT)
+    # Daily at 00:30 UTC (after US market close)
     - cron: '30 0 * * 2-6'
   workflow_dispatch:
     inputs:
@@ -42,44 +42,7 @@ jobs:
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          echo "Running weekly full retraining..."
-          python -c "
-          import sys
-          sys.path.append('.')
-          from data_loader import load_dataset
-          from feature_engineering import prepare_all_features
-          from ma_optimizer import optimize_ma_window
-          from utils import get_nyse_trading_days
-          import pandas as pd
-          import numpy as np
-          
-          # Load data
-          df = load_dataset()
-          
-          # Prepare features for both MA windows
-          data_dict = {}
-          for ma in [3, 5]:
-              data_dict[ma] = prepare_all_features(df, ma_window=ma)
-          
-          # Split indices (80/10/10)
-          n = len(df)
-          train_end = int(n * 0.8)
-          val_end = int(n * 0.9)
-          
-          train_idx = np.arange(0, train_end)
-          val_idx = np.arange(train_end, val_end)
-          test_idx = np.arange(val_end, n)
-          
-          # Run optimization
-          etf_list = ['TLT', 'VNQ', 'GLD', 'SLV', 'VCIT', 'HYG', 'LQD']
-          best_ma, results = optimize_ma_window(
-              etf_list, data_dict, df[etf_list], 
-              train_idx, val_idx, test_idx
-          )
-          
-          print(f'Training complete. Best MA: {best_ma}')
-          "
+        run: python train_models.py  # Separate Python file (cleaner)
       
       - name: Commit artifacts
         if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
