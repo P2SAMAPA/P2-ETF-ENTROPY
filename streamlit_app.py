@@ -8,14 +8,14 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import joblib
 from datetime import datetime, timedelta
 from huggingface_hub import hf_hub_download, HfApi
-import joblib
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # Import our modules
-from data_loader import HF_DATASET_REPO, ETF_LIST, load_metadata, seed_dataset
+from data_loader import HF_DATASET_REPO, ETF_LIST, load_metadata, seed_dataset, load_dataset
 from update_data import incremental_update
 from utils import get_latest_trading_day, get_nyse_trading_days
 from transfer_voting import TransferVotingModel
@@ -70,41 +70,33 @@ st.markdown("""
 
 @st.cache_resource
 def load_model_artifacts():
-    """Load trained model and artifacts from HF or local"""
+    """Load trained model and artifacts from local repo"""
     try:
-        # Try to load from HF first
-        model_path = hf_hub_download(
-            repo_id=HF_DATASET_REPO,
-            filename="models/transfer_voting_best.pkl",
-            repo_type="dataset"
-        )
-        model = joblib.load(model_path)
+        # Try to load from local artifacts folder
+        artifact_path = "artifacts"
         
-        # Load best MA window info
-        meta_path = hf_hub_download(
-            repo_id=HF_DATASET_REPO,
-            filename="best_model.json",
-            repo_type="dataset"
-        )
-        with open(meta_path, 'r') as f:
+        # Load best model info
+        with open(f"{artifact_path}/best_model.json", 'r') as f:
             best_info = json.load(f)
+        
+        best_ma = best_info['best_ma_window']
+        
+        # Load the model
+        model = TransferVotingModel([], best_ma, artifact_path)
+        model.load(f"{artifact_path}/transfer_voting_MA{best_ma}.pkl")
         
         return model, best_info
     except Exception as e:
         st.error(f"Error loading model: {e}")
+        st.info("Please run training first via GitHub Actions")
         return None, None
 
 
 @st.cache_data
-def load_dataset():
+def load_data():
     """Load dataset from HF"""
     try:
-        raw_path = hf_hub_download(
-            repo_id=HF_DATASET_REPO,
-            filename="raw_data.parquet",
-            repo_type="dataset"
-        )
-        df = pd.read_parquet(raw_path)
+        df = load_dataset()
         return df
     except Exception as e:
         st.error(f"Error loading dataset: {e}")
@@ -144,14 +136,12 @@ def generate_next_day_prediction(model, df, etf_list, best_ma):
     
     next_trading_day = future_days[0]
     
-    # Prepare features for prediction (simplified - would need full feature engineering)
-    # This is a placeholder - actual implementation would use feature_engineering.py
+    # Placeholder prediction - in production this would use actual feature engineering
     predictions = {}
     
     for etf in etf_list:
-        # Mock prediction for now - in production this uses the actual model
-        # predictions[etf] = model.predict_single_etf(features[etf], etf)
-        predictions[etf] = np.random.randn() * 0.01  # Placeholder
+        # Mock prediction for now
+        predictions[etf] = np.random.randn() * 0.01
     
     # Select best ETF
     best_etf = max(predictions, key=predictions.get)
@@ -263,7 +253,7 @@ def main():
                     st.sidebar.error(f"❌ Error refreshing data: {e}")
     
     # Load data and model
-    df = load_dataset()
+    df = load_data()
     model, best_info = load_model_artifacts()
     
     if df is None:
@@ -308,7 +298,7 @@ def main():
                 else:
                     st.error("Unable to generate prediction")
             else:
-                st.info("Model not loaded. Run training first.")
+                st.info("Model not loaded. Run training first via GitHub Actions.")
         
         with col2:
             st.metric("Latest Data", last_date.strftime('%Y-%m-%d') if last_date else "N/A")
@@ -323,7 +313,7 @@ def main():
         # Metrics section
         st.subheader("Performance Metrics (OOS Period)")
         
-        # Placeholder metrics - in production load from artifacts/oos_metrics.json
+        # Placeholder metrics
         metrics_cols = st.columns(5)
         
         placeholder_metrics = {
