@@ -1,7 +1,7 @@
-name: Initial Data Seed (One-Time)
+name: Initial Dataset Seed
 
 on:
-  workflow_dispatch:  # Only runs when you manually trigger it
+  workflow_dispatch:  # Only manual trigger
 
 jobs:
   seed:
@@ -19,20 +19,22 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
       
-      - name: Run Initial Seed
+      - name: Run Initial Seed (2008-Today)
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -c "
-import sys
-sys.path.append('.')
-from data_loader import seed_dataset
-seed_dataset()
-print('Seed complete!')
+          from data_loader import seed_dataset
+          print('Starting initial seed...')
+          seed_dataset()
+          print('Seed complete!')
           "
       
       - name: Verify Upload
         run: |
-          echo "Dataset seeded to HuggingFace"
-          echo "Check your HF dataset repo: P2SAMAPA/etf-entropy-dataset"
+          python -c "
+          from data_loader import load_metadata
+          meta = load_metadata()
+          print(f'Dataset seeded: {meta}')
+          "
