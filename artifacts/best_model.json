@@ -1,0 +1,8 @@
+{
+  "best_ma_window": 5,
+  "ma3_mse": 0.10492685310532136,
+  "ma5_mse": 0.04157586311144384,
+  "ma3_pseudo_return": 0.905037285671507,
+  "ma5_pseudo_return": 0.9600836918520304,
+  "selection_criteria": "lowest_validation_mse"
+}
