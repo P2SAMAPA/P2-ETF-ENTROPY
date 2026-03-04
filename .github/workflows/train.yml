@@ -49,6 +49,12 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          # Remove .gitkeep if models exist
+          if [ -f "artifacts/.gitkeep" ]; then
+            if [ "$(ls -A artifacts/*.pkl 2>/dev/null)" ]; then
+              git rm artifacts/.gitkeep || true
+            fi
+          fi
           git add artifacts/
           git commit -m "Add model artifacts [$(date +%Y-%m-%d)]" || echo "No changes to commit"
           git push || echo "Nothing to push"
