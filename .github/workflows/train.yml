@@ -21,11 +21,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_PAT }}  # Use PAT for push permissions
       
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'  # Keep 3.10 for training
+          python-version: '3.10'
       
       - name: Install Dependencies
         run: pip install -r requirements.txt
@@ -41,18 +43,33 @@ jobs:
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python train_models.py
+        run: |
+          echo "Starting training..."
+          python train_models.py
+          echo "Training complete. Checking artifacts..."
+          ls -la artifacts/ || echo "No artifacts folder!"
       
-      - name: Commit artifacts to repo
+      - name: Commit and Push Artifacts
         if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          if [ -f "artifacts/.gitkeep" ]; then
-            if [ "$(ls -A artifacts/*.pkl 2>/dev/null)" ]; then
-              git rm artifacts/.gitkeep || true
-            fi
+          
+          # Check what's in artifacts
+          echo "Contents of artifacts/:"
+          ls -la artifacts/ || echo "Folder doesn't exist"
+          
+          # Stage all artifacts
+          git add -f artifacts/
+          
+          # Check status
+          git status
+          
+          # Commit if there are changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add model artifacts [$(date +%Y-%m-%d)]"
+            git push
+            echo "Artifacts committed and pushed!"
           fi
-          git add artifacts/
-          git commit -m "Add model artifacts [$(date +%Y-%m-%d)]" || echo "No changes to commit"
-          git push || echo "Nothing to push"
