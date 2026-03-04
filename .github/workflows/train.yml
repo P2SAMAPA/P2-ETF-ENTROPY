@@ -2,26 +2,90 @@ name: ETF Entropy Pipeline
 
 on:
   schedule:
+    # Daily at 00:30 UTC (after US market close, handles EST/EDT)
     - cron: '30 0 * * 2-6'
   workflow_dispatch:
+    inputs:
+      run_training:
+        description: 'Run full retraining'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   update-and-train:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - uses: actions/checkout@v3
-
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.10
-
+          python-version: '3.10'
+      
       - name: Install Dependencies
         run: pip install -r requirements.txt
-
-      - name: Incremental Update
+      
+      - name: Daily Incremental Update
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python update_data.py
+      
+      - name: Weekly Full Retraining
+        if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "Running weekly full retraining..."
+          python -c "
+          import sys
+          sys.path.append('.')
+          from data_loader import load_dataset
+          from feature_engineering import prepare_all_features
+          from ma_optimizer import optimize_ma_window
+          from utils import get_nyse_trading_days
+          import pandas as pd
+          import numpy as np
+          
+          # Load data
+          df = load_dataset()
+          
+          # Prepare features for both MA windows
+          data_dict = {}
+          for ma in [3, 5]:
+              data_dict[ma] = prepare_all_features(df, ma_window=ma)
+          
+          # Split indices (80/10/10)
+          n = len(df)
+          train_end = int(n * 0.8)
+          val_end = int(n * 0.9)
+          
+          train_idx = np.arange(0, train_end)
+          val_idx = np.arange(train_end, val_end)
+          test_idx = np.arange(val_end, n)
+          
+          # Run optimization
+          etf_list = ['TLT', 'VNQ', 'GLD', 'SLV', 'VCIT', 'HYG', 'LQD']
+          best_ma, results = optimize_ma_window(
+              etf_list, data_dict, df[etf_list], 
+              train_idx, val_idx, test_idx
+          )
+          
+          print(f'Training complete. Best MA: {best_ma}')
+          "
+      
+      - name: Commit artifacts
+        if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add artifacts/
+          git commit -m "Update model artifacts [$(date +%Y-%m-%d)]" || echo "No changes"
+          git push || echo "Nothing to push"
