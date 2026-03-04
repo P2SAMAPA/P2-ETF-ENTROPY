@@ -1,0 +1,15 @@
+pandas
+numpy
+yfinance
+fredapi
+scikit-learn
+xgboost
+lightgbm
+joblib
+scipy
+fastdtw
+pyarrow
+huggingface_hub
+pandas_market_calendars
+streamlit
+matplotlib
