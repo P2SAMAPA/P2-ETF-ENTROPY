@@ -50,33 +50,13 @@ jobs:
         if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          python -c "
-import os
-from huggingface_hub import HfApi
-api = HfApi(token=os.getenv('HF_TOKEN'))
-repo_id = 'P2SAMAPA/etf-entropy-dataset'
-
-# Upload each file individually
-artifact_path = 'artifacts'
-for file in os.listdir(artifact_path):
-    if file.endswith(('.pkl', '.json', '.npy')):
-        print(f'Uploading {file}...')
-        api.upload_file(
-            path_or_fileobj=f'{artifact_path}/{file}',
-            path_in_repo=f'models/{file}',
-            repo_id=repo_id,
-            repo_type='dataset'
-        )
-print('All artifacts uploaded to HF!')
-          "
+        run: python upload_artifacts.py
       
       - name: Commit small files to GitHub
         if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # Only commit small files (best_model.json)
           git add artifacts/best_model.json
           git commit -m "Update best model info [$(date +%Y-%m-%d)]" || echo "No changes"
           git push || echo "Push failed, but HF upload succeeded"
