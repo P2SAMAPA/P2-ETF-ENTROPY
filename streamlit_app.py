@@ -117,10 +117,10 @@ def load_data():
 
 
 @st.cache_data
-def run_full_backtest(model, df, best_ma, tsl_pct, tx_cost, z_threshold):
+def run_full_backtest(_model, df, best_ma, tsl_pct, tx_cost, z_threshold):
     """
     Run full backtest with selected parameters
-    Returns backtest results and metrics
+    _model is prefixed with underscore to exclude from hashing
     """
     etf_list = ['TLT', 'VNQ', 'GLD', 'SLV', 'VCIT', 'HYG', 'LQD']
     
@@ -150,7 +150,7 @@ def run_full_backtest(model, df, best_ma, tsl_pct, tx_cost, z_threshold):
     for etf in etf_list:
         if etf in features_dict:
             X_test = features_dict[etf].loc[test_dates]
-            preds = model.predict_single_etf(X_test, etf)
+            preds = _model.predict_single_etf(X_test, etf)
             predictions_dict[etf] = pd.Series(preds, index=test_dates)
     
     # Run strategy backtest
@@ -198,7 +198,7 @@ def check_data_freshness():
         return False, f"Error checking freshness: {e}", None
 
 
-def generate_next_day_prediction(model, df, best_ma):
+def generate_next_day_prediction(_model, df, best_ma):
     """Generate prediction for next trading day"""
     etf_list = ['TLT', 'VNQ', 'GLD', 'SLV', 'VCIT', 'HYG', 'LQD']
     
@@ -224,7 +224,7 @@ def generate_next_day_prediction(model, df, best_ma):
         if etf in features_dict:
             # Get latest features
             X_latest = features_dict[etf].iloc[-1:]
-            pred = model.predict_single_etf(X_latest, etf)
+            pred = _model.predict_single_etf(X_latest, etf)
             predictions[etf] = pred[0]
     
     # Select best ETF by expected return
@@ -339,7 +339,7 @@ def main():
     results = None
     metrics = None
     
-    if model is not None:
+   if model is not None:
         with st.spinner("Running backtest... This may take a minute."):
             try:
                 results, metrics = run_full_backtest(
