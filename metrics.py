@@ -107,4 +107,48 @@ def calculate_metrics(equity_curve, returns, risk_free, audit_trail=None):
     
     # 10. Average Win / Average Loss
     avg_win = returns[returns > 0].mean() if wins > 0 else 0
-    avg_loss = returns[returns < 0].mean()
+    avg_loss = returns[returns < 0].mean() if (returns < 0).sum() > 0 else 0
+    metrics['avg_win'] = avg_win
+    metrics['avg_loss'] = avg_loss
+    metrics['win_loss_ratio'] = abs(avg_win / avg_loss) if avg_loss != 0 else np.inf
+    
+    return metrics
+
+
+def format_metrics_for_display(metrics):
+    """
+    Format metrics for nice Streamlit display
+    """
+    formatted = {
+        'Annualized Return': f"{metrics['annualized_return']:.2%}",
+        'Sharpe Ratio': f"{metrics['sharpe_ratio']:.2f}",
+        'Max Drawdown': f"{metrics['max_drawdown']:.2%}",
+        'Max DD Date': str(metrics['max_drawdown_date'])[:10] if metrics['max_drawdown_date'] else 'N/A',
+        'Worst Daily DD': f"{metrics['worst_daily_return']:.2%}",
+        'Worst Daily Date': str(metrics['worst_daily_date'])[:10] if metrics['worst_daily_date'] else 'N/A',
+        'Hit Ratio (15d)': f"{metrics['hit_ratio_15d']:.1%}" if metrics['hit_ratio_15d'] is not None else 'N/A',
+        'Volatility': f"{metrics['volatility']:.2%}",
+        'Win Rate': f"{metrics['win_rate']:.1%}",
+        'Calmar Ratio': f"{metrics['calmar_ratio']:.2f}",
+        'Total Return': f"{metrics['total_return']:.2%}"
+    }
+    return formatted
+
+
+def calculate_benchmark_metrics(price_df, tbill_df, test_dates, benchmark='SPY'):
+    """
+    Calculate metrics for benchmark buy-and-hold
+    """
+    if benchmark not in price_df.columns:
+        return None
+    
+    bench_prices = price_df.loc[test_dates, benchmark]
+    bench_returns = bench_prices.pct_change().dropna()
+    
+    # Align dates
+    bench_returns = bench_returns.iloc[:len(test_dates)-1]
+    rf_aligned = risk_free.iloc[:len(bench_returns)]
+    
+    equity = (1 + bench_returns).cumprod()
+    
+    return calculate_metrics(equity, bench_returns, rf_aligned)
