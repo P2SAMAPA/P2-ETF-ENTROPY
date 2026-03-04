@@ -185,11 +185,10 @@ expected_ret = expected_returns[predicted_etf]
 
 nyse = mcal.get_calendar("NYSE")
 schedule = nyse.schedule(
-    start_date=latest_date,
+    start_date=latest_date + pd.Timedelta(days=1),
     end_date=latest_date + pd.Timedelta(days=10)
 )
-future = schedule.index[schedule.index > latest_date]
-next_trading_day = future[0]
+next_trading_day = schedule.index[0]
 
 st.markdown("## 📅 Next Trading Day Allocation")
 
