@@ -1,7 +1,6 @@
 """
-Base Models Module
-Trains 5 ensemble models: RandomForest, XGBoost, LightGBM, AdaBoost, DecisionTree
-With GridSearchCV as specified in the Entropy paper
+Base Models Module - OPTIMIZED for faster training
+Reduced hyperparameter grids for GitHub Actions time limits
 """
 
 import numpy as np
@@ -16,52 +15,43 @@ import os
 
 def get_base_models():
     """
-    Returns dictionary of base models with their parameter grids
-    Using TimeSeriesSplit for cross-validation (financial time series)
+    Returns dictionary of base models with REDUCED parameter grids
+    for faster training in CI/CD environment
     """
     
     models = {
         'RandomForest': {
-            'model': RandomForestRegressor(random_state=42, n_jobs=-1),
+            'model': RandomForestRegressor(random_state=42, n_jobs=-1, n_estimators=100),
             'params': {
-                'n_estimators': [100, 200],
-                'max_depth': [5, 10, None],
-                'min_samples_split': [2, 5],
-                'min_samples_leaf': [1, 2]
+                'max_depth': [5, 10],
+                'min_samples_split': [5],
             }
         },
         'XGBoost': {
-            'model': xgb.XGBRegressor(random_state=42, n_jobs=-1),
+            'model': xgb.XGBRegressor(random_state=42, n_jobs=-1, n_estimators=100),
             'params': {
-                'n_estimators': [100, 200],
-                'max_depth': [3, 5, 7],
-                'learning_rate': [0.01, 0.1],
-                'subsample': [0.8, 1.0]
+                'max_depth': [3, 5],
+                'learning_rate': [0.1],
             }
         },
         'LightGBM': {
-            'model': lgb.LGBMRegressor(random_state=42, n_jobs=-1, verbose=-1),
+            'model': lgb.LGBMRegressor(random_state=42, n_jobs=-1, n_estimators=100, verbose=-1),
             'params': {
-                'n_estimators': [100, 200],
-                'max_depth': [5, 10, -1],
-                'learning_rate': [0.01, 0.1],
-                'num_leaves': [31, 50]
+                'max_depth': [5, 10],
+                'learning_rate': [0.1],
             }
         },
         'AdaBoost': {
-            'model': AdaBoostRegressor(random_state=42),
+            'model': AdaBoostRegressor(random_state=42, n_estimators=50),
             'params': {
-                'n_estimators': [50, 100, 200],
-                'learning_rate': [0.01, 0.1, 1.0],
-                'loss': ['linear', 'square', 'exponential']
+                'learning_rate': [0.1, 1.0],
             }
         },
         'DecisionTree': {
             'model': DecisionTreeRegressor(random_state=42),
             'params': {
-                'max_depth': [5, 10, None],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4]
+                'max_depth': [5, 10],
+                'min_samples_split': [5],
             }
         }
     }
@@ -71,39 +61,49 @@ def get_base_models():
 
 def train_base_models(X_train, y_train, artifact_path='artifacts'):
     """
-    Trains all base models with GridSearchCV
-    Returns dictionary of trained models
+    Trains all base models with reduced GridSearchCV
     """
     os.makedirs(artifact_path, exist_ok=True)
     
     models_config = get_base_models()
     trained_models = {}
     
-    # Time Series Cross-Validation (5 splits as per paper)
-    tscv = TimeSeriesSplit(n_splits=5)
+    # Reduced CV splits for speed (3 instead of 5)
+    tscv = TimeSeriesSplit(n_splits=3)
     
     for name, config in models_config.items():
-        print(f"Training {name}...")
+        print(f"  Training {name}...")
         
-        grid_search = GridSearchCV(
-            estimator=config['model'],
-            param_grid=config['params'],
-            cv=tscv,
-            scoring='neg_mean_squared_error',
-            n_jobs=-1,
-            verbose=0
-        )
+        # Reduce search space further if dataset is large
+        n_samples = len(X_train)
+        if n_samples > 2000:
+            # Use best guess parameters for large datasets (skip grid search)
+            model = config['model']
+            model.fit(X_train, y_train)
+            trained_models[name] = {
+                'model': model,
+                'best_params': 'default (large dataset)',
+                'best_score': 0
+            }
+        else:
+            grid_search = GridSearchCV(
+                estimator=config['model'],
+                param_grid=config['params'],
+                cv=tscv,
+                scoring='neg_mean_squared_error',
+                n_jobs=-1,
+                verbose=0
+            )
+            
+            grid_search.fit(X_train, y_train)
+            
+            trained_models[name] = {
+                'model': grid_search.best_estimator_,
+                'best_params': grid_search.best_params_,
+                'best_score': grid_search.best_score_
+            }
         
-        grid_search.fit(X_train, y_train)
-        
-        trained_models[name] = {
-            'model': grid_search.best_estimator_,
-            'best_params': grid_search.best_params_,
-            'best_score': grid_search.best_score_
-        }
-        
-        print(f"  Best params: {grid_search.best_params_}")
-        print(f"  Best CV score: {grid_search.best_score_:.6f}")
+        print(f"    Done")
     
     return trained_models
 
@@ -124,7 +124,6 @@ def load_base_models(ma_window, etf_name, artifact_path='artifacts'):
 def predict_base_models(trained_models, X):
     """
     Generate predictions from all base models
-    Returns array of predictions (n_samples, n_models)
     """
     predictions = {}
     for name, model_dict in trained_models.items():
