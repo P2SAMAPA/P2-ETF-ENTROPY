@@ -116,4 +116,79 @@ def load_dataset():
         print(f"HF load failed: {e}")
         # Try local fallback
         if os.path.exists("raw_data.parquet"):
-           
+            df = pd.read_parquet("raw_data.parquet")
+            print(f"Loaded dataset from local: {df.shape}")
+            return df
+        else:
+            raise FileNotFoundError("No dataset found. Run seed_dataset() first.")
+
+
+def seed_dataset(end_date=None):
+    """
+    Initial seed of dataset from 2008 to present (or specified end_date)
+    One-time operation to populate HF dataset repository
+    
+    Parameters:
+    -----------
+    end_date : str, optional
+        End date for seeding (default: latest trading day)
+    """
+    print("="*60)
+    print("SEEDING DATASET FROM 2008")
+    print("="*60)
+    
+    start_date = "2008-01-01"
+    
+    if end_date is None:
+        end_date = get_latest_trading_day()
+    
+    print(f"Date range: {start_date} to {end_date}")
+    
+    # Download data
+    etf = download_etf_data(start_date, end_date)
+    tbill = download_tbill_data(start_date, end_date)
+    
+    # Join and clean
+    df = etf.join(tbill, how="left")
+    df = df.ffill().bfill()  # Forward and backward fill
+    
+    # Ensure all expected columns present
+    expected_cols = ETF_LIST + ["3MTBILL"]
+    for col in expected_cols:
+        if col not in df.columns:
+            print(f"Warning: {col} not in dataset")
+    
+    # Save locally first
+    df.to_parquet("raw_data.parquet")
+    print(f"Saved raw data: {df.shape}")
+    
+    # Create metadata
+    metadata = {
+        "last_data_update": str(end_date),
+        "last_training_date": None,
+        "best_ma_window": None,
+        "dataset_version": 1,
+        "seed_date": str(datetime.today().date())
+    }
+    
+    with open("metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+    
+    # Upload to HF
+    print("Uploading to HuggingFace...")
+    save_to_hf("raw_data.parquet", "raw_data.parquet")
+    save_to_hf("metadata.json", "metadata.json")
+    
+    print("="*60)
+    print(f"SEED COMPLETE! Dataset available till: {end_date}")
+    print("="*60)
+    
+    return df
+
+
+def get_last_update_date():
+    """Helper to get last update date from metadata"""
+    meta = load_metadata()
+    if meta:
+        return pd.to_datetime(meta["last_data_update"])
+    return None
