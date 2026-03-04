@@ -1,0 +1,27 @@
+name: ETF Entropy Pipeline
+
+on:
+  schedule:
+    - cron: '30 0 * * 2-6'
+  workflow_dispatch:
+
+jobs:
+  update-and-train:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.10
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Incremental Update
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python update_data.py
