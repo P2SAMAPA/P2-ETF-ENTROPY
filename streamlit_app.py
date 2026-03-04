@@ -339,7 +339,7 @@ def main():
     results = None
     metrics = None
     
-   if model is not None:
+    if model is not None:
         with st.spinner("Running backtest... This may take a minute."):
             try:
                 results, metrics = run_full_backtest(
