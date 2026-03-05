@@ -1,6 +1,6 @@
 """
 ETF Transfer Voting Engine
-Production Version (GitHub Training + HF Storage + Streamlit Inference)
+Production Version (OOS-Aligned + EST Clock Corrected)
 """
 
 import streamlit as st
@@ -11,6 +11,8 @@ import os
 import matplotlib.pyplot as plt
 import pandas_market_calendars as mcal
 from huggingface_hub import hf_hub_download
+import pytz
+from datetime import datetime
 
 from data_loader import load_dataset, load_metadata
 from update_data import incremental_update
@@ -19,11 +21,10 @@ from strategy_engine import StrategyEngine
 from transfer_voting import TransferVotingModel
 from backtest import run_backtest
 from metrics import calculate_metrics
-from utils import get_latest_trading_day
 
 
 # --------------------------------------------------
-# PAGE CONFIG
+# CONFIG
 # --------------------------------------------------
 
 st.set_page_config(
@@ -39,61 +40,37 @@ ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD"]
 
 
 # --------------------------------------------------
-# HELPERS
+# EST CLOCK + NEXT NYSE SESSION
 # --------------------------------------------------
 
-def get_next_trading_day(last_date):
+def get_next_nyse_session():
+    eastern = pytz.timezone("US/Eastern")
+    now_est = datetime.now(eastern)
+
     nyse = mcal.get_calendar("NYSE")
+
     schedule = nyse.schedule(
-        start_date=last_date,
-        end_date=last_date + pd.Timedelta(days=10)
+        start_date=now_est.date(),
+        end_date=now_est.date() + pd.Timedelta(days=10)
     )
-    future = schedule.index[schedule.index > last_date]
-    return future[0] if len(future) > 0 else None
 
+    today = pd.Timestamp(now_est.date())
 
-def color_returns(val):
-    if val > 0:
-        return "color: green"
-    elif val < 0:
-        return "color: red"
-    return ""
-
-
-# --------------------------------------------------
-# DATA REFRESH
-# --------------------------------------------------
-
-st.sidebar.header("🔄 Data Management")
-
-def check_data_freshness():
-    metadata = load_metadata()
-    if metadata is None:
-        return False, "No dataset metadata found.", None
-
-    last_update = pd.to_datetime(metadata["last_data_update"])
-    latest_trading = pd.to_datetime(get_latest_trading_day())
-
-    if last_update >= latest_trading:
-        return True, f"Dataset updated till {last_update.date()}", last_update.date()
-    else:
-        return False, f"Dataset stale (last: {last_update.date()})", last_update.date()
-
-is_fresh, freshness_msg, last_date = check_data_freshness()
-st.sidebar.info(freshness_msg)
-
-if st.sidebar.button("Refresh Dataset"):
-    with st.spinner("Checking for incremental updates..."):
-        if is_fresh:
-            st.sidebar.success(freshness_msg)
+    if today in schedule.index:
+        # If after market close (4 PM EST), use next session
+        if now_est.hour >= 16:
+            future = schedule.index[schedule.index > today]
+            return future[0]
         else:
-            incremental_update()
-            st.sidebar.success("Dataset updated successfully.")
-            st.rerun()
+            return today
+    else:
+        # Today not trading day
+        future = schedule.index[schedule.index > today]
+        return future[0]
 
 
 # --------------------------------------------------
-# STRATEGY CONTROLS
+# SIDEBAR
 # --------------------------------------------------
 
 st.sidebar.header("⚙️ Strategy Controls")
@@ -102,10 +79,6 @@ year_start = st.sidebar.slider("Start Year", 2008, 2025, 2008)
 tsl_pct = st.sidebar.slider("Trailing Stop Loss (%)", 10, 25, 15)
 tx_cost = st.sidebar.slider("Transaction Cost (bps)", 10, 75, 25)
 z_threshold = st.sidebar.slider("Z-Score Re-entry", 0.5, 2.0, 1.0)
-
-st.sidebar.markdown("---")
-st.sidebar.write("Data Source: HuggingFace Dataset")
-st.sidebar.write("Model: Transfer Voting")
 
 
 # --------------------------------------------------
@@ -118,19 +91,15 @@ def load_data():
 
 df = load_data()
 
-if df is None:
-    st.error("Dataset not found.")
-    st.stop()
-
 df = df[df.index.year >= year_start]
 
 
 # --------------------------------------------------
-# LOAD MODEL
+# LOAD MODEL + METADATA
 # --------------------------------------------------
 
 @st.cache_resource
-def load_model_from_hf():
+def load_model_and_meta():
 
     os.makedirs("artifacts", exist_ok=True)
 
@@ -156,19 +125,21 @@ def load_model_from_hf():
     model = TransferVotingModel(ETF_LIST, best_ma, "artifacts")
     model.load(model_path)
 
-    return model, best_ma
+    return model, model_info
 
-model, best_ma = load_model_from_hf()
+model, model_info = load_model_and_meta()
+
+oos_start = pd.to_datetime(model_info["oos_start_date"])
+oos_end = pd.to_datetime(model_info["oos_end_date"])
 
 
 # --------------------------------------------------
-# FEATURE ENGINEERING
+# FEATURES
 # --------------------------------------------------
 
-data_dict = prepare_all_features(df, ma_window=best_ma)
+data_dict = prepare_all_features(df, ma_window=model_info["best_ma_window"])
 features = data_dict["features"]
 
-# common feature dates (for backtest only)
 common_dates = None
 for etf in ETF_LIST:
     idx = features[etf].index
@@ -184,7 +155,7 @@ tbill_df = df["3MTBILL"].loc[common_dates]
 
 
 # --------------------------------------------------
-# PREDICTIONS FOR BACKTEST
+# PREDICTIONS (FULL RANGE)
 # --------------------------------------------------
 
 predictions = {}
@@ -196,7 +167,7 @@ for etf in ETF_LIST:
 
 
 # --------------------------------------------------
-# BACKTEST
+# BACKTEST (FULL RANGE → SLICE OOS)
 # --------------------------------------------------
 
 engine = StrategyEngine(
@@ -214,11 +185,21 @@ results = run_backtest(
     common_dates
 )
 
+# Slice strictly to OOS window
+equity_curve = results["equity_curve"].loc[oos_start:oos_end]
+returns_oos = results["returns"].loc[oos_start:oos_end]
+risk_free_oos = results["risk_free"].loc[oos_start:oos_end]
+audit_oos = results["audit_trail"]
+audit_oos = audit_oos[
+    (pd.to_datetime(audit_oos["date"]) >= oos_start) &
+    (pd.to_datetime(audit_oos["date"]) <= oos_end)
+]
+
 metrics = calculate_metrics(
-    results["equity_curve"]["strategy"],
-    results["returns"],
-    results["risk_free"],
-    results["audit_trail"]
+    equity_curve["strategy"],
+    returns_oos,
+    risk_free_oos,
+    audit_oos
 )
 
 
@@ -235,10 +216,8 @@ tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📋 Audit Trail", "📖 Methodol
 
 with tab1:
 
-    latest_data_date = df.index[-1]
-    next_day = get_next_trading_day(latest_data_date)
+    next_session = get_next_nyse_session()
 
-    # use last feature row ONLY for prediction
     latest_features = {etf: features[etf].iloc[-1:] for etf in ETF_LIST}
 
     expected_returns = {}
@@ -249,18 +228,14 @@ with tab1:
             latest_features[etf], etf
         )[0]
 
-        # convert MA_Diff into expected return properly
-        current_price = df.loc[latest_data_date, etf]
+        current_price = df.iloc[-1][etf]
         expected_price = current_price + predicted_ma_diff
-
         expected_return = (expected_price - current_price) / current_price
 
         expected_returns[etf] = expected_return
 
     predicted_etf = max(expected_returns, key=expected_returns.get)
     expected_ret = expected_returns[predicted_etf]
-
-    st.subheader("Next Trading Day Allocation")
 
     st.markdown(f"""
     <div style="background-color:#f4f8fb;
@@ -269,7 +244,7 @@ with tab1:
                 text-align:center;
                 border:3px solid #1f77b4;">
         <div style="font-size:18px;margin-bottom:10px;">
-            {next_day.date() if next_day else ""}
+            Next NYSE Session: {next_session.date()}
         </div>
         <div style="font-size:54px;font-weight:bold;color:#1f77b4;">
             {predicted_etf}
@@ -292,17 +267,10 @@ with tab1:
     col5.metric("Hit Ratio (15d)", f"{metrics['hit_ratio_15d']:.2%}")
 
     st.markdown("---")
-    st.subheader("Equity Curve")
+    st.subheader("Equity Curve (OOS Only)")
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(results["equity_curve"]["strategy"], label="Strategy", linewidth=2)
-
-    if "SPY" in results["equity_curve"].columns:
-        ax.plot(results["equity_curve"]["SPY"], label="SPY", alpha=0.7)
-
-    if "AGG" in results["equity_curve"].columns:
-        ax.plot(results["equity_curve"]["AGG"], label="AGG", alpha=0.7)
-
+    ax.plot(equity_curve["strategy"], label="Strategy", linewidth=2)
     ax.legend()
     ax.grid(True)
 
@@ -310,21 +278,15 @@ with tab1:
 
 
 # ==================================================
-# AUDIT TRAIL
+# AUDIT TRAIL (OOS ONLY)
 # ==================================================
 
 with tab2:
 
-    st.subheader("Last 15 Trading Days")
+    st.subheader("Last 15 Trading Days (OOS)")
 
-    audit = results["audit_trail"].tail(15).copy()
-    audit["actual_return"] = audit["actual_return"].astype(float)
-
-    styled = audit[["date", "predicted_etf", "actual_return"]].style.applymap(
-        color_returns, subset=["actual_return"]
-    )
-
-    st.dataframe(styled, use_container_width=True)
+    audit_tail = audit_oos.tail(15).copy()
+    st.dataframe(audit_tail, use_container_width=True)
 
 
 # ==================================================
@@ -333,39 +295,8 @@ with tab2:
 
 with tab3:
 
-    st.subheader("Strategy Methodology")
-
-    st.markdown("""
-### Research Foundation
-Flexible Target Prediction for Quantitative Trading in the American Stock Market  
-Journal: Entropy (2026)
-
-### Core Innovation
-Instead of predicting raw prices,  
-we predict:
-
-MA_Diff(t+1) = MA(t+1) − MA(t)
-
-This reduces noise and improves stability.
-
-### Model Stack
-Random Forest  
-XGBoost  
-LightGBM  
-AdaBoost  
-Decision Tree  
-
-Transfer Voting with cross-ETF similarity weighting.
-
-### Trading Logic
-1. Select ETF with highest expected return  
-2. If all negative → move to T-Bill  
-3. Apply trailing stop loss  
-4. Re-enter via Z-score threshold  
-5. Include transaction costs  
-
-### Automation
-- Daily incremental data update  
-- Weekly retraining (GitHub Actions)  
-- HuggingFace dataset storage  
+    st.markdown(f"""
+**Training Window:** {model_info['train_start_date']} → {model_info['train_end_date']}  
+**Validation Window:** {model_info['validation_start_date']} → {model_info['validation_end_date']}  
+**OOS Window:** {model_info['oos_start_date']} → {model_info['oos_end_date']}
 """)
