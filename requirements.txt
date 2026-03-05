@@ -14,4 +14,4 @@ pandas-market-calendars==4.5.1
 streamlit==1.41.1
 matplotlib==3.10.0
 altair==5.5.0
-plotly
+plotly>=5.0.0
