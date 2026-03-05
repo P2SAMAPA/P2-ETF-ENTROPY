@@ -52,9 +52,9 @@ def run_backtest(predictions_dict,
         equity_curve.append(equity)
         strategy_returns.append(daily_return)
 
-        # FIX 2 — correct column name and include last day properly
+        # FIX 2 — audit aligned with equity date
         audit.append({
-            "date": date,  # keep audit aligned with equity date
+            "date": date,  # ensures last day is included
             "selected_etf": selected,
             "actual_return": daily_return
         })
