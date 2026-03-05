@@ -4,33 +4,34 @@ train_models.py — P2-ETF-ENTROPY
 ==================================
 Full training pipeline for GitHub Actions.
 
+80/10/10 split (train/val/OOS) computed dynamically from year_start.
+Val set used for MA window selection. OOS never touched during training.
+
 Steps
 -----
 1. Load dataset from HuggingFace
-2. Build features for MA(3) and MA(5) — train/test split enforced
-3. Compute DTW weights on training prices only (2008–2021)
+2. Build features for MA(3) and MA(5) with 80/10/10 split
+3. Compute DTW weights on 80% train prices only
 4. Train TransferVotingModel for each MA window
-5. Run backtest on OOS (test) set to pick best MA window
-6. Save best model + metadata to HuggingFace
+5. Evaluate on VAL set (10%) to pick best MA window
+6. Report OOS metrics (10%) — informational only, not used for selection
+7. Save best model + metadata + split info to HuggingFace
 
-Outputs saved to HF dataset (P2SAMAPA/etf-entropy-dataset)
-  models/transfer_voting_MA{3|5}.pkl
-  models/best_model.json
-  models/dtw_matrix_MA{3|5}.npy
-  metadata.json  (updated last_training_date + best_ma_window)
+Timing is logged at each step so you can see where time is spent.
 """
 
 import os
 import sys
 import json
+import time
 import tempfile
 import numpy as np
 import pandas as pd
 from datetime import datetime
 
-from data_loader import load_dataset, load_metadata, save_to_hf, HF_DATASET_REPO
+from data_loader import load_dataset, load_metadata, save_to_hf
 from feature_engineering import (
-    prepare_all_features, TARGET_ETFS, TRAIN_END
+    prepare_all_features, get_oos_dates, TARGET_ETFS
 )
 from transfer_voting import TransferVotingModel
 from strategy_engine import StrategyEngine
@@ -41,48 +42,33 @@ ARTIFACT_DIR = "artifacts"
 MA_WINDOWS   = [3, 5]
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-def _save_and_upload(obj_bytes_or_path, repo_path: str):
-    """Write to a temp file then upload to HF."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(repo_path)[1]) as f:
-        if isinstance(obj_bytes_or_path, (bytes, bytearray)):
-            f.write(obj_bytes_or_path)
-            tmp = f.name
-        else:
-            tmp = obj_bytes_or_path   # already a file path
-    save_to_hf(tmp, repo_path)
-    if tmp != obj_bytes_or_path:
-        os.unlink(tmp)
+def _timer(label, start):
+    elapsed = time.time() - start
+    print(f"  ⏱  {label}: {elapsed:.1f}s")
+    return elapsed
 
 
-def _run_oos_backtest(
-    model: TransferVotingModel,
-    data_dict: dict,
-    price_df: pd.DataFrame,
-    tbill_series: pd.Series,
-    tsl_pct: float = 15,
-    tx_cost_bps: float = 25,
-    z_threshold: float = 1.0,
-) -> dict:
-    """Run backtest on OOS (test) window, return metrics dict."""
+def _run_backtest_on_split(model, data_dict, split_key, price_df, tbill_series,
+                            tsl_pct=15, tx_cost_bps=25, z_threshold=1.0):
+    """
+    Run backtest on a given split ('features_val' or 'features_test').
+    Returns (metrics_dict, results_dict).
+    """
+    X_dict = data_dict[split_key]
 
-    # Get test features (already normalised with train stats)
-    X_test_dict = data_dict["features_test"]
+    pred_raw = model.predict_all_etfs(X_dict)
+    predictions = {
+        etf: pd.Series(preds, index=X_dict[etf].index)
+        for etf, preds in pred_raw.items()
+        if etf in X_dict
+    }
 
-    # Predict — full transfer voting on test features
-    predictions_raw = model.predict_all_etfs(X_test_dict)
+    if not predictions:
+        return {}, {}
 
-    # Wrap as pd.Series indexed by date
-    predictions = {}
-    for etf, preds in predictions_raw.items():
-        idx = X_test_dict[etf].index
-        predictions[etf] = pd.Series(preds, index=idx)
-
-    # Align price_df to test window
-    test_dates = sorted(set().union(*[s.index for s in predictions.values()]))
-    price_test = price_df.loc[price_df.index.isin(test_dates)]
-    tbill_test = tbill_series.loc[tbill_series.index.isin(test_dates)]
+    all_dates   = sorted(set().union(*[set(s.index) for s in predictions.values()]))
+    price_slice = price_df.loc[price_df.index.isin(all_dates)]
+    tbill_slice = tbill_series.loc[tbill_series.index.isin(all_dates)]
 
     engine = StrategyEngine(
         TARGET_ETFS,
@@ -90,8 +76,7 @@ def _run_oos_backtest(
         transaction_cost_bps=tx_cost_bps,
         z_score_threshold=z_threshold,
     )
-
-    results = run_backtest(predictions, price_test, tbill_test, engine, test_dates)
+    results = run_backtest(predictions, price_slice, tbill_slice, engine, all_dates)
     metrics = calculate_metrics(
         results["equity_curve"]["strategy"],
         results["returns"],
@@ -101,9 +86,9 @@ def _run_oos_backtest(
     return metrics, results
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
-
 def main():
+    t_total = time.time()
+
     print("=" * 60)
     print("P2-ETF-ENTROPY — Training Pipeline")
     print(f"Started: {datetime.utcnow().isoformat()}Z")
@@ -112,37 +97,57 @@ def main():
     os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
     # ── 1. Load dataset ───────────────────────────────────────────────
-    print("\nStep 1: Loading dataset from HuggingFace...")
+    t = time.time()
+    print("\nStep 1: Loading dataset...")
     df = load_dataset()
     print(f"  Shape: {df.shape}  |  {df.index[0].date()} → {df.index[-1].date()}")
+    _timer("load dataset", t)
 
-    # Verify required columns
     missing = [c for c in TARGET_ETFS + ["3MTBILL"] if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+        raise ValueError(f"Missing columns: {missing}")
 
     price_df     = df[TARGET_ETFS].copy()
     tbill_series = df["3MTBILL"].copy()
 
-    # Training-window prices only (for DTW — no look-ahead)
-    train_price_df = price_df.loc[price_df.index <= pd.Timestamp(TRAIN_END)]
-    print(f"  Training window for DTW: {train_price_df.index[0].date()} → "
-          f"{train_price_df.index[-1].date()} ({len(train_price_df)} rows)")
+    # Default training uses full history from 2008
+    year_start = 2008
 
     # ── 2. Build features for both MA windows ─────────────────────────
-    print("\nStep 2: Building features...")
+    t = time.time()
+    print(f"\nStep 2: Building features (year_start={year_start})...")
     data_by_ma = {}
     for ma in MA_WINDOWS:
-        data_by_ma[ma] = prepare_all_features(df, ma_window=ma, train_end=TRAIN_END)
+        data_by_ma[ma] = prepare_all_features(df, ma_window=ma, year_start=year_start)
+    _timer("feature engineering (both MA windows)", t)
 
-    # ── 3. Train TransferVotingModel for each MA window ───────────────
-    print("\nStep 3: Training models...")
-    models    = {}
+    # Print split summary for first ETF
+    ref_etf = TARGET_ETFS[0]
+    for ma in MA_WINDOWS:
+        sd = data_by_ma[ma]["split_dates"].get(ref_etf, {})
+        if sd:
+            print(f"\n  MA({ma}) split ({ref_etf}):")
+            print(f"    Train : {sd['train_start']} → {sd['train_end']}  ({sd['n_train']} rows)")
+            print(f"    Val   : {sd['val_start']}   → {sd['val_end']}    ({sd['n_val']} rows)")
+            print(f"    OOS   : {sd['oos_start']}   → {sd['oos_end']}    ({sd['n_test']} rows)")
+
+    # ── 3. Train models ───────────────────────────────────────────────
+    models      = {}
+    val_metrics = {}
     oos_metrics = {}
 
     for ma in MA_WINDOWS:
-        print(f"\n--- MA({ma}) ---")
+        print(f"\n{'='*60}")
+        print(f"Step 3: Training TransferVotingModel — MA({ma})")
+        print(f"{'='*60}")
+        t = time.time()
+
         data_dict = data_by_ma[ma]
+
+        # DTW on training prices only (80% window)
+        # Determine train end date from split_dates
+        train_end_date = data_dict["split_dates"][ref_etf]["train_end"]
+        train_price_df = price_df.loc[price_df.index <= pd.Timestamp(train_end_date)]
 
         model = TransferVotingModel(TARGET_ETFS, ma, ARTIFACT_DIR)
         model.fit(
@@ -151,35 +156,52 @@ def main():
             train_price_df = train_price_df,
         )
         models[ma] = model
+        t_train = _timer(f"MA({ma}) training", t)
 
-        # Save model locally
-        local_path = os.path.join(ARTIFACT_DIR, f"transfer_voting_MA{ma}.pkl")
-        model.save(local_path)
+        # Save locally
+        local_pkl = os.path.join(ARTIFACT_DIR, f"transfer_voting_MA{ma}.pkl")
+        model.save(local_pkl)
 
-        # ── 4. OOS backtest to evaluate this MA window ────────────────
-        print(f"\nStep 4a: OOS backtest for MA({ma})...")
-        metrics, results = _run_oos_backtest(
-            model, data_dict, price_df, tbill_series
+        # ── 4. Val backtest (used for MA selection) ───────────────────
+        t = time.time()
+        print(f"\nStep 4a: Validation backtest — MA({ma})...")
+        v_metrics, _ = _run_backtest_on_split(
+            model, data_dict, "features_val", price_df, tbill_series
         )
-        oos_metrics[ma] = metrics
-        print(f"  MA({ma}) OOS → Ann Return: {metrics.get('ann_return', 0)*100:.2f}%  "
-              f"Sharpe: {metrics.get('sharpe', 0):.3f}  "
-              f"MaxDD: {metrics.get('max_dd', 0)*100:.2f}%")
+        val_metrics[ma] = v_metrics
+        _timer(f"MA({ma}) val backtest", t)
+        print(f"  VAL  → Ann Return: {v_metrics.get('ann_return', 0)*100:.2f}%  "
+              f"Sharpe: {v_metrics.get('sharpe', 0):.3f}  "
+              f"MaxDD: {v_metrics.get('max_dd', 0)*100:.2f}%")
 
-    # ── 5. Select best MA window ──────────────────────────────────────
-    print("\nStep 5: Selecting best MA window...")
-    best_ma = max(MA_WINDOWS, key=lambda m: oos_metrics[m].get("ann_return", -np.inf))
-    print(f"  Best MA window: {best_ma}  "
-          f"(Ann Return = {oos_metrics[best_ma].get('ann_return',0)*100:.2f}%)")
+        # ── 5. OOS backtest (informational only) ──────────────────────
+        t = time.time()
+        print(f"\nStep 4b: OOS backtest — MA({ma}) (informational)...")
+        o_metrics, _ = _run_backtest_on_split(
+            model, data_dict, "features_test", price_df, tbill_series
+        )
+        oos_metrics[ma] = o_metrics
+        _timer(f"MA({ma}) OOS backtest", t)
+        print(f"  OOS  → Ann Return: {o_metrics.get('ann_return', 0)*100:.2f}%  "
+              f"Sharpe: {o_metrics.get('sharpe', 0):.3f}  "
+              f"MaxDD: {o_metrics.get('max_dd', 0)*100:.2f}%")
 
-    # ── 6. Determine OOS date range ───────────────────────────────────
-    best_X_test   = data_by_ma[best_ma]["features_test"]
-    oos_dates     = sorted(set().union(*[X.index for X in best_X_test.values()]))
-    oos_start_str = str(oos_dates[0].date())  if oos_dates else ""
-    oos_end_str   = str(oos_dates[-1].date()) if oos_dates else ""
+    # ── 6. Select best MA using VAL performance ───────────────────────
+    print(f"\n{'='*60}")
+    print("Step 5: MA window selection (by Val Ann Return)")
+    print(f"{'='*60}")
+    best_ma = max(MA_WINDOWS, key=lambda m: val_metrics[m].get("ann_return", -np.inf))
+    print(f"  MA(3) val Ann Return: {val_metrics[3].get('ann_return',0)*100:.2f}%")
+    print(f"  MA(5) val Ann Return: {val_metrics[5].get('ann_return',0)*100:.2f}%")
+    print(f"  ✅ Selected: MA({best_ma})")
 
-    # ── 7. Save artifacts to HuggingFace ─────────────────────────────
-    print("\nStep 6: Uploading artifacts to HuggingFace...")
+    # ── 7. Gather OOS split dates for the best MA ─────────────────────
+    best_data   = data_by_ma[best_ma]
+    oos_start, oos_end = get_oos_dates(best_data)
+
+    # ── 8. Upload to HuggingFace ──────────────────────────────────────
+    t = time.time()
+    print(f"\nStep 6: Uploading to HuggingFace...")
 
     for ma in MA_WINDOWS:
         local_pkl = os.path.join(ARTIFACT_DIR, f"transfer_voting_MA{ma}.pkl")
@@ -191,18 +213,24 @@ def main():
             save_to_hf(dtw_path, f"models/dtw_matrix_MA{ma}.npy")
             print(f"  Uploaded dtw_matrix_MA{ma}.npy")
 
-    # best_model.json — read by Streamlit app
+    # best_model.json — Streamlit reads this on startup
     best_model_info = {
-        "best_ma_window":    best_ma,
-        "oos_start_date":    oos_start_str,
-        "oos_end_date":      oos_end_str,
-        "training_end_date": TRAIN_END,
-        "ma3_ann_return":    round(oos_metrics[3].get("ann_return", 0), 6),
-        "ma5_ann_return":    round(oos_metrics[5].get("ann_return", 0), 6),
-        "ma3_sharpe":        round(oos_metrics[3].get("sharpe", 0), 4),
-        "ma5_sharpe":        round(oos_metrics[5].get("sharpe", 0), 4),
-        "last_trained":      datetime.utcnow().isoformat() + "Z",
-        "etf_list":          TARGET_ETFS,
+        "best_ma_window":      best_ma,
+        "year_start":          year_start,
+        "split_pct":           "80/10/10",
+        "oos_start_date":      str(oos_start.date()) if oos_start else "",
+        "oos_end_date":        str(oos_end.date())   if oos_end   else "",
+        "ma3_val_ann_return":  round(val_metrics[3].get("ann_return", 0), 6),
+        "ma5_val_ann_return":  round(val_metrics[5].get("ann_return", 0), 6),
+        "ma3_val_sharpe":      round(val_metrics[3].get("sharpe", 0), 4),
+        "ma5_val_sharpe":      round(val_metrics[5].get("sharpe", 0), 4),
+        "ma3_oos_ann_return":  round(oos_metrics[3].get("ann_return", 0), 6),
+        "ma5_oos_ann_return":  round(oos_metrics[5].get("ann_return", 0), 6),
+        "ma3_oos_sharpe":      round(oos_metrics[3].get("sharpe", 0), 4),
+        "ma5_oos_sharpe":      round(oos_metrics[5].get("sharpe", 0), 4),
+        "split_dates":         best_data["split_dates"],
+        "last_trained":        datetime.utcnow().isoformat() + "Z",
+        "etf_list":            TARGET_ETFS,
     }
 
     bm_path = os.path.join(ARTIFACT_DIR, "best_model.json")
@@ -221,15 +249,24 @@ def main():
     save_to_hf(meta_path, "metadata.json")
     print("  Updated metadata.json")
 
-    print("\n" + "=" * 60)
+    _timer("HF upload", t)
+
+    # ── Final summary ─────────────────────────────────────────────────
+    total_elapsed = time.time() - t_total
+    print(f"\n{'='*60}")
     print("Training pipeline complete.")
-    print(f"  Best MA:    {best_ma}")
-    print(f"  OOS window: {oos_start_str} → {oos_end_str}")
+    print(f"  Total time : {total_elapsed/60:.1f} minutes")
+    print(f"  Best MA    : {best_ma}")
+    print(f"  OOS window : {oos_start.date() if oos_start else '?'} → "
+          f"{oos_end.date() if oos_end else '?'}")
+    print(f"\n  {'MA':>4}  {'Val Ret':>9}  {'Val Shrp':>9}  {'OOS Ret':>9}  {'OOS Shrp':>9}")
     for ma in MA_WINDOWS:
-        m = oos_metrics[ma]
-        print(f"  MA({ma}): Return={m.get('ann_return',0)*100:.2f}%  "
-              f"Sharpe={m.get('sharpe',0):.3f}  "
-              f"MaxDD={m.get('max_dd',0)*100:.2f}%")
+        marker = " ✅" if ma == best_ma else "   "
+        print(f"  {ma:>4}{marker}  "
+              f"{val_metrics[ma].get('ann_return',0)*100:>8.2f}%  "
+              f"{val_metrics[ma].get('sharpe',0):>9.3f}  "
+              f"{oos_metrics[ma].get('ann_return',0)*100:>8.2f}%  "
+              f"{oos_metrics[ma].get('sharpe',0):>9.3f}")
     print("=" * 60)
 
 
