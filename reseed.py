@@ -38,12 +38,21 @@ def reseed():
                     ticker, start=start_date, end=end_exclusive,
                     auto_adjust=True, progress=False, threads=False
                 )
+                # yfinance returns MultiIndex columns even for single ticker
                 if isinstance(df_t.columns, pd.MultiIndex):
-                    df_t = df_t["Close"].to_frame(ticker)
+                    df_t = df_t["Close"]
+                    # Result may be Series or DataFrame depending on version
+                    if isinstance(df_t, pd.DataFrame):
+                        df_t = df_t.iloc[:, 0]  # take first column
+                    df_t.name = ticker
                 else:
-                    df_t.columns = [ticker]
+                    # Flat columns — find Close or take first
+                    close_col = next((c for c in df_t.columns
+                                      if str(c).lower() == "close"), df_t.columns[0])
+                    df_t = df_t[close_col]
+                    df_t.name = ticker
                 if not df_t.empty:
-                    frames[ticker] = df_t[ticker]
+                    frames[ticker] = df_t
                     print(f"    ✅ {ticker}: {len(df_t)} rows")
                     time.sleep(2)   # polite pacing between tickers
                     break
