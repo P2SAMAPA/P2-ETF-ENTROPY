@@ -1,19 +1,17 @@
 """
 P2-ETF-ENTROPY Streamlit App
-Professional Production Version
+Fully Stabilized Production Version
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json
 import joblib
 import pandas_market_calendars as mcal
 from datetime import timedelta
 
 from strategy_engine import StrategyEngine
 from backtest import run_backtest
-from optimize_ma import load_best_model
 
 st.set_page_config(layout="wide")
 
@@ -32,6 +30,23 @@ def load_data():
 price_df, tbill_df, predictions_dict = load_data()
 
 # ==========================================================
+# ENSURE DATE ALIGNMENT (CRITICAL FIX)
+# ==========================================================
+
+# Use prediction coverage — not full price history
+prediction_dates = None
+for series in predictions_dict.values():
+    prediction_dates = (
+        series.index if prediction_dates is None
+        else prediction_dates.intersection(series.index)
+    )
+
+prediction_dates = pd.DatetimeIndex(sorted(prediction_dates))
+
+price_df = price_df.loc[prediction_dates]
+tbill_df = tbill_df.loc[prediction_dates]
+
+# ==========================================================
 # SIDEBAR CONTROLS
 # ==========================================================
 
@@ -39,37 +54,27 @@ st.sidebar.header("Strategy Controls")
 
 tsl_slider = st.sidebar.slider(
     "Trailing Stop Loss (%)",
-    min_value=10,
-    max_value=25,
-    value=15
+    10, 25, 15
 )
 
 transaction_slider = st.sidebar.slider(
     "Transaction Cost (bps)",
-    min_value=10,
-    max_value=75,
-    value=25
+    10, 75, 25
 )
 
 z_threshold_slider = st.sidebar.slider(
     "Z-Score Re-entry Threshold",
-    min_value=0.5,
-    max_value=2.0,
-    value=1.0
+    0.5, 2.0, 1.0
 )
 
 # ==========================================================
-# BACKTEST DATE SPLIT
+# BACKTEST RANGE (USE FULL PREDICTION WINDOW)
 # ==========================================================
 
-n = len(price_df)
-train_end = int(n * 0.8)
-val_end = int(n * 0.9)
-
-test_dates = price_df.index[val_end:]  # FULL OOS RANGE
+test_dates = prediction_dates
 
 # ==========================================================
-# STRATEGY ENGINE
+# RUN STRATEGY
 # ==========================================================
 
 etf_list = list(predictions_dict.keys())
@@ -93,21 +98,22 @@ equity_curve = results["equity_curve"]
 audit_df = results["audit_trail"].copy()
 
 # ==========================================================
-# HERO BOX (NEXT TRADING DAY)
+# HERO BOX (FIXED DATE LOGIC)
 # ==========================================================
 
-latest_data_date = price_df.index.max()
+# Use last prediction date — NOT price max
+last_prediction_date = prediction_dates.max()
 
 nyse = mcal.get_calendar("NYSE")
 
 schedule = nyse.schedule(
-    start_date=latest_data_date + timedelta(days=1),
-    end_date=latest_data_date + timedelta(days=10)
+    start_date=last_prediction_date + timedelta(days=1),
+    end_date=last_prediction_date + timedelta(days=10)
 )
 
 next_trading_day = schedule.index[0].date()
 
-latest_signal = results["audit_trail"].iloc[-1]["predicted_etf"]
+latest_signal = audit_df.iloc[-1]["predicted_etf"]
 
 st.markdown("## 📈 Next Trading Day Prediction")
 
@@ -116,13 +122,13 @@ st.markdown(
     <div style="
         background-color:#111827;
         padding:30px;
-        border-radius:10px;
+        border-radius:12px;
         text-align:center;
         font-size:24px;
         font-weight:600;
         color:white;">
-        Predicted ETF for {next_trading_day}: <br><br>
-        <span style="font-size:36px; color:#22C55E;">
+        Predicted ETF for {next_trading_day}:<br><br>
+        <span style="font-size:38px; color:#22C55E;">
         {latest_signal}
         </span>
     </div>
@@ -150,6 +156,7 @@ sharpe = annualized_return / annualized_vol if annualized_vol > 0 else 0
 
 rolling_max = equity_curve["strategy"].cummax()
 drawdown = equity_curve["strategy"] / rolling_max - 1
+
 max_dd = drawdown.min()
 max_dd_date = drawdown.idxmin().date()
 
@@ -161,12 +168,13 @@ col3.metric("Max Drawdown", f"{max_dd*100:.2f}%")
 col4.metric("Max DD Date", f"{max_dd_date}")
 
 # ==========================================================
-# AUDIT TRAIL TABLE (PROFESSIONAL STYLING)
+# AUDIT TRAIL (PROFESSIONAL STYLING)
 # ==========================================================
 
 st.markdown("## 🧾 Audit Trail")
 
-audit_df["actual_return"] = audit_df["actual_return"] * 100
+audit_display = audit_df.copy()
+audit_display["actual_return"] = audit_display["actual_return"] * 100
 
 def style_returns(val):
     if pd.isna(val):
@@ -177,13 +185,13 @@ def style_returns(val):
         return "color:#C00000; font-weight:600;"
     return ""
 
-styled_audit = (
-    audit_df.style
+styled = (
+    audit_display.style
     .format({"actual_return": "{:.2f}%"})
     .applymap(style_returns, subset=["actual_return"])
 )
 
-st.dataframe(styled_audit, use_container_width=True)
+st.dataframe(styled, use_container_width=True)
 
 # ==========================================================
 # COLLAPSIBLE METHODOLOGY
@@ -191,26 +199,26 @@ st.dataframe(styled_audit, use_container_width=True)
 
 with st.expander("📘 Methodology", expanded=False):
     st.markdown("""
-    ### Model
-    - Transfer Voting Regression across 7 ETFs
-    - MA(3) vs MA(5) window optimization
-    - Selection based on lowest validation MSE
-    
-    ### Allocation Logic
-    - Cross-sectional ranking by expected return
-    - Trailing Stop Loss (peak-based)
-    - Z-score re-entry filter
-    - Transaction cost friction applied
-    
-    ### Risk Controls
-    - Move to cash when all predictions negative
-    - 2x transaction cost threshold for switching
-    - Professional out-of-sample backtest
-    
-    ### Benchmarks
-    - SPY (Equity proxy)
-    - AGG (Bond proxy)
-    """)
+### Model
+- Transfer Voting regression across ETF universe
+- MA(3) vs MA(5) optimization
+- Annualized OOS return selection
+
+### Allocation Logic
+- Cross-sectional ranking by expected return
+- Peak-based trailing stop loss
+- Z-score controlled re-entry
+- Transaction cost friction
+
+### Risk Controls
+- Move to cash when all expected returns negative
+- 2× transaction cost switching threshold
+- Fully out-of-sample backtest
+
+### Benchmarks
+- SPY (Equity proxy)
+- AGG (Bond proxy)
+""")
 
 # ==========================================================
 # FOOTER
