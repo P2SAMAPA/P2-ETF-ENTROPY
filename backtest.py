@@ -75,5 +75,5 @@ def run_backtest(predictions_dict,
         "equity_curve": equity_df,
         "returns": returns_series,
         "risk_free": rf_series,
-        "audit_trail": pd.DataFrame(audit)
+        "audit_trail": pd.DataFrame(audit).set_index("date")
     }
