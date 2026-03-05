@@ -19,20 +19,19 @@ def incremental_update():
         print("No dataset found. Run seed first.")
         return
 
-    last_update     = pd.to_datetime(metadata["last_data_update"])
-    latest_trading  = pd.to_datetime(get_latest_trading_day())
+    last_update = pd.to_datetime(metadata["last_data_update"])
 
-    # ── Guard: already up to date ─────────────────────────────────────────────
-    if last_update >= latest_trading:
-        print(f"Dataset already up to date ({last_update.date()}). Nothing to do.")
-        return
-
+    # Use today as the target — let yfinance return whatever is available
+    # (markets may be mid-session; yfinance returns completed bars only)
+    import pytz
+    eastern  = pytz.timezone("US/Eastern")
+    today    = pd.Timestamp(pd.Timestamp.now(tz=eastern).date())
     start_date = (last_update + timedelta(days=1)).strftime("%Y-%m-%d")
-    end_date   = latest_trading.strftime("%Y-%m-%d")
+    end_date   = today.strftime("%Y-%m-%d")
 
-    # Double-check dates are sane (handles timezone edge cases)
+    # ── Guard: start is after today — nothing to fetch ────────────────────────
     if start_date > end_date:
-        print(f"start_date {start_date} > end_date {end_date} — nothing to download.")
+        print(f"Dataset already up to date ({last_update.date()}). Nothing to do.")
         return
 
     # ── Download with retry for yfinance rate limits ──────────────────────────
@@ -55,7 +54,8 @@ def incremental_update():
 
     df.to_parquet("raw_data.parquet")
 
-    metadata["last_data_update"] = end_date
+    # Use the last date actually present in the merged df
+    metadata["last_data_update"] = str(df.index[-1].date())
     metadata["dataset_version"]  = metadata.get("dataset_version", 1) + 1
 
     with open("metadata.json", "w") as f:
