@@ -31,47 +31,20 @@ def max_drawdown(equity_curve):
 def get_next_trading_day(current_date):
     """
     Get the next trading day after the given date.
-    
-    Parameters:
-    -----------
-    current_date : pd.Timestamp or datetime
-        The current date to find the next trading day from
-        
-    Returns:
-    --------
-    pd.Timestamp
-        The next valid trading day
     """
     trading_days = get_nyse_trading_days()
-    # Convert to pandas Timestamp for comparison
     current = pd.Timestamp(current_date)
-    
-    # Find the next trading day strictly after current_date
     future_days = trading_days[trading_days > current]
-    
     if len(future_days) > 0:
         return future_days[0]
     else:
-        # If no future trading days found (edge case), return current + 1 day
         return current + pd.Timedelta(days=1)
 
 # ── NEW HELPERS ───────────────────────────────────────────────────────────────
 
 def get_hero_next_date(predictions, etfs):
     """
-    Return the correct next date for hero box, based on prediction index.
-    
-    Parameters:
-    -----------
-    predictions : dict
-        Dictionary of predictions per ETF (pd.Series)
-    etfs : list
-        List of ETFs to use (one of them is enough)
-        
-    Returns:
-    --------
-    pd.Timestamp
-        Next trading day after last prediction
+    Return the correct next date for hero box, based on last prediction index.
     """
     last_pred_date = sorted(list(predictions[etfs[0]].index))[-1]
     return get_next_trading_day(last_pred_date)
@@ -80,27 +53,10 @@ def get_oos_index(equity, returns, rf_series, oos_start, oos_end):
     """
     Return aligned OOS indices for equity, returns, and risk-free rates.
     Ensures slices are not empty after look-ahead adjustments.
-    
-    Parameters:
-    -----------
-    equity : pd.DataFrame
-        Equity curve with strategy column
-    returns : pd.Series
-        Strategy daily returns
-    rf_series : pd.Series
-        Risk-free daily returns
-    oos_start : pd.Timestamp
-        OOS start date
-    oos_end : pd.Timestamp
-        OOS end date
-        
-    Returns:
-    --------
-    tuple of (equity_oos, returns_oos, rf_oos)
     """
     oos_mask = (equity.index >= oos_start) & (equity.index <= oos_end)
     oos_index = equity.index[oos_mask]
-    
+
     # Keep only dates that exist in returns and risk-free
     oos_index = oos_index.intersection(returns.index)
     
