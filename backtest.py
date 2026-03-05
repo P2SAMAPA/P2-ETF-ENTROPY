@@ -17,6 +17,9 @@ def run_backtest(predictions_dict,
         test_dates
     )
 
+    # FIX 1 — remove look-ahead bias (execute signal next day)
+    signals = signals.shift(1)
+
     equity = 1.0
     equity_curve = []
     strategy_returns = []
@@ -50,11 +53,12 @@ def run_backtest(predictions_dict,
         equity_curve.append(equity)
         strategy_returns.append(daily_return)
 
+        # FIX 2 — correct column name expected by app.py
         audit.append({
             "date": date,
             "selected_etf": selected,
             "actual_return": daily_return
-         })
+        })
 
     equity_series = pd.Series(equity_curve, index=test_dates)
     returns_series = pd.Series(strategy_returns, index=test_dates)
@@ -75,5 +79,6 @@ def run_backtest(predictions_dict,
         "equity_curve": equity_df,
         "returns": returns_series,
         "risk_free": rf_series,
+        # FIX 3 — set datetime index so Streamlit filtering works
         "audit_trail": pd.DataFrame(audit).set_index("date")
     }
