@@ -24,15 +24,44 @@ def reseed():
     # ── ETF data ──────────────────────────────────────────────────────
     print(f"\nDownloading ETF data {start_date} → {end_date}...")
     from datetime import timedelta, datetime as dt
+    import time
     end_exclusive = (dt.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-    
-    etf = yf.download(
-        ETF_LIST, start=start_date, end=end_exclusive,
-        auto_adjust=True, progress=True, threads=False
-    )
-    if isinstance(etf.columns, pd.MultiIndex):
-        etf = etf["Close"]
+
+    # Download each ticker individually with delay to avoid rate limiting
+    # GitHub Actions IPs are heavily rate-limited by Yahoo when batching
+    frames = {}
+    for ticker in ETF_LIST:
+        for attempt in range(4):
+            try:
+                print(f"  Downloading {ticker} (attempt {attempt+1})...")
+                df_t = yf.download(
+                    ticker, start=start_date, end=end_exclusive,
+                    auto_adjust=True, progress=False, threads=False
+                )
+                if isinstance(df_t.columns, pd.MultiIndex):
+                    df_t = df_t["Close"].to_frame(ticker)
+                else:
+                    df_t.columns = [ticker]
+                if not df_t.empty:
+                    frames[ticker] = df_t[ticker]
+                    print(f"    ✅ {ticker}: {len(df_t)} rows")
+                    time.sleep(2)   # polite pacing between tickers
+                    break
+            except Exception as e:
+                wait = 20 * (2 ** attempt)
+                print(f"    ⚠️  {ticker} attempt {attempt+1} failed: {e}")
+                if attempt < 3:
+                    print(f"    Waiting {wait}s...")
+                    time.sleep(wait)
+
+    if not frames:
+        raise RuntimeError("All ticker downloads failed")
+
+    etf = pd.DataFrame(frames)
     print(f"ETF data: {etf.shape}  ({etf.index[0].date()} → {etf.index[-1].date()})")
+    missing = [t for t in ETF_LIST if t not in etf.columns]
+    if missing:
+        print(f"  ⚠️  Missing tickers: {missing}")
 
     # ── T-Bill data ───────────────────────────────────────────────────
     print(f"\nDownloading T-Bill data {start_date} → {end_date}...")
