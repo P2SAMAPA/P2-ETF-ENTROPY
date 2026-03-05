@@ -52,9 +52,9 @@ def run_backtest(predictions_dict,
 
         audit.append({
             "date": date,
-            "predicted_etf": selected,
+            "selected_etf": selected,
             "actual_return": daily_return
-        })
+         })
 
     equity_series = pd.Series(equity_curve, index=test_dates)
     returns_series = pd.Series(strategy_returns, index=test_dates)
