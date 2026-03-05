@@ -27,8 +27,7 @@ def run_backtest(predictions_dict,
 
     for i, date in enumerate(test_dates):
 
-        selected = signals.loc[date, "selected_etf"]
-
+        selected = signals.loc[date, "selected_etf"] if pd.notna(signals.loc[date, "selected_etf"]) else "CASH"
         if i < len(test_dates) - 1:
             next_date = test_dates[i + 1]
 
