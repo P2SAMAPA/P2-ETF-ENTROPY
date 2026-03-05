@@ -61,11 +61,10 @@ def color_returns(val):
 
 
 # --------------------------------------------------
-# DATA REFRESH SECTION
+# DATA REFRESH
 # --------------------------------------------------
 
 st.sidebar.header("🔄 Data Management")
-
 
 def check_data_freshness():
     metadata = load_metadata()
@@ -79,7 +78,6 @@ def check_data_freshness():
         return True, f"Dataset updated till {last_update.date()}", last_update.date()
     else:
         return False, f"Dataset stale (last: {last_update.date()})", last_update.date()
-
 
 is_fresh, freshness_msg, last_date = check_data_freshness()
 st.sidebar.info(freshness_msg)
@@ -118,7 +116,6 @@ st.sidebar.write("Model: Transfer Voting")
 def load_data():
     return load_dataset()
 
-
 df = load_data()
 
 if df is None:
@@ -129,7 +126,7 @@ df = df[df.index.year >= year_start]
 
 
 # --------------------------------------------------
-# LOAD MODEL FROM HF
+# LOAD MODEL
 # --------------------------------------------------
 
 @st.cache_resource
@@ -161,7 +158,6 @@ def load_model_from_hf():
 
     return model, best_ma
 
-
 model, best_ma = load_model_from_hf()
 
 
@@ -172,6 +168,7 @@ model, best_ma = load_model_from_hf()
 data_dict = prepare_all_features(df, ma_window=best_ma)
 features = data_dict["features"]
 
+# common feature dates (for backtest only)
 common_dates = None
 for etf in ETF_LIST:
     idx = features[etf].index
@@ -187,7 +184,7 @@ tbill_df = df["3MTBILL"].loc[common_dates]
 
 
 # --------------------------------------------------
-# GENERATE PREDICTIONS
+# PREDICTIONS FOR BACKTEST
 # --------------------------------------------------
 
 predictions = {}
@@ -233,21 +230,32 @@ tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📋 Audit Trail", "📖 Methodol
 
 
 # ==================================================
-# DASHBOARD TAB
+# DASHBOARD
 # ==================================================
 
 with tab1:
 
-    latest_date = common_dates[-1]
-    next_day = get_next_trading_day(latest_date)
+    latest_data_date = df.index[-1]
+    next_day = get_next_trading_day(latest_data_date)
 
+    # use last feature row ONLY for prediction
     latest_features = {etf: features[etf].iloc[-1:] for etf in ETF_LIST}
 
     expected_returns = {}
+
     for etf in ETF_LIST:
-        pred = model.predict_single_etf(latest_features[etf], etf)[0]
-        price = df.loc[latest_date, etf]
-        expected_returns[etf] = pred / price if price > 0 else 0
+
+        predicted_ma_diff = model.predict_single_etf(
+            latest_features[etf], etf
+        )[0]
+
+        # convert MA_Diff into expected return properly
+        current_price = df.loc[latest_data_date, etf]
+        expected_price = current_price + predicted_ma_diff
+
+        expected_return = (expected_price - current_price) / current_price
+
+        expected_returns[etf] = expected_return
 
     predicted_etf = max(expected_returns, key=expected_returns.get)
     expected_ret = expected_returns[predicted_etf]
@@ -283,15 +291,18 @@ with tab1:
     col4.metric("Worst Daily Return", f"{metrics['worst_daily_return']:.2%}")
     col5.metric("Hit Ratio (15d)", f"{metrics['hit_ratio_15d']:.2%}")
 
-    st.caption(f"Worst Daily Return Date: {metrics.get('worst_daily_date')}")
-
     st.markdown("---")
     st.subheader("Equity Curve")
 
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(results["equity_curve"]["strategy"], label="Strategy", linewidth=2)
-    ax.plot(results["equity_curve"]["SPY"], label="SPY", alpha=0.7)
-    ax.plot(results["equity_curve"]["AGG"], label="AGG", alpha=0.7)
+
+    if "SPY" in results["equity_curve"].columns:
+        ax.plot(results["equity_curve"]["SPY"], label="SPY", alpha=0.7)
+
+    if "AGG" in results["equity_curve"].columns:
+        ax.plot(results["equity_curve"]["AGG"], label="AGG", alpha=0.7)
+
     ax.legend()
     ax.grid(True)
 
@@ -299,7 +310,7 @@ with tab1:
 
 
 # ==================================================
-# AUDIT TAB
+# AUDIT TRAIL
 # ==================================================
 
 with tab2:
@@ -317,7 +328,7 @@ with tab2:
 
 
 # ==================================================
-# METHODOLOGY TAB
+# METHODOLOGY
 # ==================================================
 
 with tab3:
@@ -325,51 +336,36 @@ with tab3:
     st.subheader("Strategy Methodology")
 
     st.markdown("""
-### 📄 Research Foundation
-**Flexible Target Prediction for Quantitative Trading in the American Stock Market**  
-Journal: *Entropy (2026)*  
+### Research Foundation
+Flexible Target Prediction for Quantitative Trading in the American Stock Market  
+Journal: Entropy (2026)
 
----
+### Core Innovation
+Instead of predicting raw prices,  
+we predict:
 
-### 🎯 Core Innovation
-Instead of predicting raw closing prices (high entropy),  
-the model predicts:
+MA_Diff(t+1) = MA(t+1) − MA(t)
 
-**MA_Diff(t+1) = MA(t+1) − MA(t)**
+This reduces noise and improves stability.
 
-This reduces noise and improves predictive stability.
+### Model Stack
+Random Forest  
+XGBoost  
+LightGBM  
+AdaBoost  
+Decision Tree  
 
-MA(3) and MA(5) are tested; the window with higher  
-out-of-sample annualized return is selected.
+Transfer Voting with cross-ETF similarity weighting.
 
----
-
-### 🧠 Model Architecture
-Base Models:
-- Random Forest  
-- XGBoost  
-- LightGBM  
-- AdaBoost  
-- Decision Tree  
-
-Transfer Voting:
-- Cross-ETF similarity weighting  
-- Dynamic Time Warping (DTW)
-
----
-
-### ⚙️ Trading Logic
-1. Select ETF with highest predicted expected return  
-2. If all predictions negative → allocate to CASH (3M T-Bill)  
+### Trading Logic
+1. Select ETF with highest expected return  
+2. If all negative → move to T-Bill  
 3. Apply trailing stop loss  
 4. Re-enter via Z-score threshold  
-5. Apply transaction cost friction  
+5. Include transaction costs  
 
----
-
-### 🔄 Automation
+### Automation
 - Daily incremental data update  
 - Weekly retraining (GitHub Actions)  
 - HuggingFace dataset storage  
-- CI/CD pipeline  
 """)
