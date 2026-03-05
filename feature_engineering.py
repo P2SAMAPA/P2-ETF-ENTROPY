@@ -74,9 +74,86 @@ def compute_split_indices(n):
 
 
 def prepare_all_features(df, ma_window=5, year_start=2008):
-    # ... (rest of your code unchanged) ...
-    # returns results dict as before
-    pass  # keep original content
+    """Prepare features with 80/10/10 split starting from year_start."""
+    # Filter data from year_start onwards
+    df_filtered = df[df.index >= f"{year_start}-01-01"].copy()
+    
+    if len(df_filtered) < 100:  # Minimum data check
+        return {"features": {}, "split_dates": {}, "features_test": {}}
+    
+    # Add technical indicators
+    features_df = add_technical_indicators(df_filtered, ma_window)
+    
+    # Remove rows with NaN values
+    features_df = features_df.dropna()
+    
+    # Align with original df to get targets
+    df_aligned = df_filtered.loc[features_df.index]
+    
+    # Build features dict per ETF
+    features = {}
+    targets = {}
+    for etf in TARGET_ETFS:
+        if etf not in df_aligned.columns:
+            continue
+            
+        # Feature columns for this ETF
+        etf_feature_cols = [c for c in features_df.columns if c.startswith(f"{etf}_") or c == "TBILL"]
+        if len(etf_feature_cols) == 0:
+            continue
+            
+        X = features_df[etf_feature_cols]
+        y = create_target(df_aligned, etf, ma_window)
+        
+        # Align X and y
+        common_idx = X.index.intersection(y.dropna().index)
+        X = X.loc[common_idx]
+        y = y.loc[common_idx]
+        
+        if len(X) < 50:
+            continue
+            
+        features[etf] = X
+        targets[etf] = y
+    
+    if not features:
+        return {"features": {}, "split_dates": {}, "features_test": {}}
+    
+    # Compute 80/10/10 split indices
+    n = len(features[TARGET_ETFS[0]])
+    train_end, val_end = compute_split_indices(n)
+    
+    # Split features and compute dates
+    split_dates = {}
+    features_test = {}
+    
+    for etf in features:
+        X = features[etf]
+        
+        # Get dates for splits
+        all_dates = X.index
+        train_dates = all_dates[:train_end]
+        val_dates = all_dates[train_end:val_end]
+        test_dates = all_dates[val_end:]
+        
+        split_dates[etf] = {
+            "train_end": train_dates[-1] if len(train_dates) > 0 else None,
+            "val_end": val_dates[-1] if len(val_dates) > 0 else None,
+            "oos_start": test_dates[0] if len(test_dates) > 0 else None,
+            "oos_end": test_dates[-1] if len(test_dates) > 0 else None,
+        }
+        
+        # Store test features for get_oos_dates to use
+        features_test[etf] = X.iloc[val_end:]
+    
+    return {
+        "features": features,
+        "targets": targets,
+        "split_dates": split_dates,
+        "features_test": features_test,
+        "train_end": train_end,
+        "val_end": val_end,
+    }
 
 
 def get_oos_dates(data_dict):
@@ -84,17 +161,23 @@ def get_oos_dates(data_dict):
 
     Corrected to ensure oos_end is the last index of test features.
     """
+    # Defensive check to prevent TypeError
+    if not isinstance(data_dict, dict):
+        return None, None
+    if "split_dates" not in data_dict or data_dict["split_dates"] is None:
+        return None, None
+    
     ref = next((e for e in TARGET_ETFS if e in data_dict["split_dates"]), None)
     if ref is None:
         return None, None
 
     sd = data_dict["split_dates"][ref]
-    oos_start = pd.Timestamp(sd["oos_start"])
+    oos_start = pd.Timestamp(sd["oos_start"]) if sd.get("oos_start") else None
 
     # Use the last index of X_test to get true oos_end
     if ref in data_dict.get("features_test", {}):
         oos_end = data_dict["features_test"][ref].index[-1]
     else:
-        oos_end = pd.Timestamp(sd["oos_end"])  # fallback
+        oos_end = pd.Timestamp(sd["oos_end"]) if sd.get("oos_end") else None
 
     return oos_start, oos_end
