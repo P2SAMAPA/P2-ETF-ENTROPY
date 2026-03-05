@@ -2,7 +2,10 @@ name: ETF Entropy Pipeline
 
 on:
   schedule:
-    - cron: '30 0 * * 2-6'
+    # Daily data update: Mon-Fri at 8pm EST (1am UTC next day)
+    - cron: '0 1 * * 2-6'
+    # Weekly full retraining: Saturday at 11pm EST (4am UTC Sunday)
+    - cron: '0 4 * * 0'
   workflow_dispatch:
     inputs:
       run_training:
@@ -17,46 +20,53 @@ on:
 jobs:
   update-and-train:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 120
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      
+
       - name: Install Dependencies
         run: pip install -r requirements.txt
-      
+
+      # ── Daily: incremental data update ──────────────────────────────
       - name: Daily Incremental Update
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python update_data.py
-      
+
+      # ── Weekly or manual: full retraining ───────────────────────────
+      # Fix: github.event.schedule matches the full cron string exactly
       - name: Weekly Full Retraining
-        if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
+        if: >
+          github.event.schedule == '0 4 * * 0' ||
+          github.event.inputs.run_training == 'true'
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          echo "Starting training..."
+          echo "Starting full retraining..."
           python train_models.py
           echo "Training complete."
-      
-      - name: Upload Artifacts to HuggingFace
-        if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python upload_artifacts.py
-      
-      - name: Commit small files to GitHub
-        if: github.event.schedule == '30 0 * * 6' || github.event.inputs.run_training == 'true'
+
+      # ── Commit best_model.json back to repo for reference ───────────
+      # (train_models.py already uploads the full model to HF —
+      #  this just keeps a lightweight copy in the repo for the
+      #  'Update best model info' commit shown in GitHub UI)
+      - name: Commit model info to GitHub
+        if: >
+          github.event.schedule == '0 4 * * 0' ||
+          github.event.inputs.run_training == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add artifacts/best_model.json
-          git commit -m "Update best model info [$(date +%Y-%m-%d)]" || echo "No changes"
-          git push || echo "Push failed, but HF upload succeeded"
+          mkdir -p artifacts
+          git add artifacts/best_model.json || true
+          git diff --staged --quiet || git commit -m "Update best model info [$(date +%Y-%m-%d)]"
+          git push || echo "Push failed — HF upload already succeeded"
