@@ -14,7 +14,6 @@ import numpy as np
 
 try:
     from fastdtw import fastdtw
-    from scipy.spatial.distance import euclidean
     FASTDTW_AVAILABLE = True
 except ImportError:
     FASTDTW_AVAILABLE = False
@@ -65,8 +64,10 @@ def compute_dtw_matrix(price_df, max_samples=500):
                 dtw_distances[i, j] = np.inf
             else:
                 try:
+                    # Use scalar lambda — scipy euclidean fails on scalar elements
                     dist, _ = fastdtw(x_clean, y_clean,
-                                      dist=euclidean, radius=10)
+                                      dist=lambda a, b: abs(float(a) - float(b)),
+                                      radius=10)
                     dtw_distances[i, j] = dist
                 except Exception as e:
                     print(f"    DTW error {assets[i]} vs {assets[j]}: {e}")
