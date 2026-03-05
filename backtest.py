@@ -54,7 +54,7 @@ def run_backtest(predictions_dict,
 
         # FIX 2 — correct column name expected by app.py
         audit.append({
-            "date": date,
+            "date": test_dates[i + 1] if i < len(test_dates) - 1 else date,
             "selected_etf": selected,
             "actual_return": daily_return
         })
