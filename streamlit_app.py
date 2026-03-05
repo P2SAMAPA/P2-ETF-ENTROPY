@@ -28,7 +28,8 @@ from strategy_engine import StrategyEngine
 from transfer_voting import TransferVotingModel
 from backtest import run_backtest
 from metrics import calculate_metrics
-from utils import get_next_trading_day
+# ─── UPDATED IMPORTS ──────────────────────────────
+from utils import get_next_trading_day, get_hero_next_date, get_oos_index
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -43,7 +44,6 @@ ETF_COLORS = {
     "SLV": "#aec7e8", "VCIT": "#2ca02c", "HYG": "#d62728",
     "LQD": "#9467bd", "CASH": "#7f7f7f",
 }
-
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("📈 ETF Entropy Engine")
@@ -159,14 +159,14 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
     # Step 4 — metrics on OOS only
     equity = results["equity_curve"]
     if oos_start and oos_end:
-        oos_mask    = (equity.index >= oos_start) & (equity.index <= oos_end)
-        equity_oos  = equity.loc[oos_mask]
-        returns_oos = results["returns"].loc[oos_mask]
-        rf_oos      = results["risk_free"].loc[oos_mask]
+        # ─── UPDATED ────────────────────────────────
+        equity_oos, returns_oos, rf_oos = get_oos_index(
+            equity, results["returns"], results["risk_free"], oos_start, oos_end
+        )
     else:
-        equity_oos  = equity
+        equity_oos = equity
         returns_oos = results["returns"]
-        rf_oos      = results["risk_free"]
+        rf_oos = results["risk_free"]
 
     metrics = calculate_metrics(
         equity_oos["strategy"], returns_oos, rf_oos, results["audit_trail"]
@@ -191,48 +191,6 @@ with st.spinner(f"Running predictions for year_start={year_start}..."):
 if results is None:
     st.error("Not enough data for the selected start year. Try an earlier year.")
     st.stop()
-
-
-# ── HEADER ────────────────────────────────────────────────────────────────────
-st.title("📈 ETF Transfer Voting Engine")
-st.caption(
-    f"Transfer Voting Ensemble · 7 ETFs · MA({best_ma}) target · "
-    f"80/10/10 split from {year_start} · "
-    f"OOS: {oos_start.date() if oos_start else '?'} → {oos_end.date() if oos_end else '?'}"
-)
-
-
-# ── TIMING EXPANDER ───────────────────────────────────────────────────────────
-with st.expander("⏱ Computation timing", expanded=False):
-    cols = st.columns(len(timings))
-    for col, (label, secs) in zip(cols, timings.items()):
-        col.metric(label, f"{secs:.1f}s")
-
-    # Also show training info from model_info
-    st.caption(
-        f"GitHub Actions training time is shown in the Actions log. "
-        f"Model last trained: **{model_info.get('last_trained', 'N/A')[:10]}**"
-    )
-    if "ma3_val_ann_return" in model_info:
-        st.caption(
-            f"MA selection (val set): "
-            f"MA(3)={model_info['ma3_val_ann_return']*100:.2f}% ann  "
-            f"MA(5)={model_info['ma5_val_ann_return']*100:.2f}% ann  "
-            f"→ MA({best_ma}) selected"
-        )
-
-
-# ── SPLIT INFO BAR ────────────────────────────────────────────────────────────
-with st.expander("📅 80/10/10 Split Details", expanded=False):
-    ref = TARGET_ETFS[0]
-    data_dict_disp = prepare_all_features(df_raw, ma_window=best_ma, year_start=year_start)
-    sd = data_dict_disp["split_dates"].get(ref, {})
-    if sd:
-        c1, c2, c3 = st.columns(3)
-        c1.info(f"**Train (80%)**\n{sd['train_start']} → {sd['train_end']}\n{sd['n_train']} days")
-        c2.warning(f"**Val (10%)**\n{sd['val_start']} → {sd['val_end']}\n{sd['n_val']} days")
-        c3.success(f"**OOS (10%)**\n{sd['oos_start']} → {sd['oos_end']}\n{sd['n_test']} days")
-    st.caption("OOS window used for all metrics and equity curve below.")
 
 
 # ── NEXT ALLOCATION ───────────────────────────────────────────────────────────
@@ -260,7 +218,8 @@ with col_sig:
             exp_returns[etf] = 0.0
 
     predicted_etf = max(exp_returns, key=exp_returns.get) if exp_returns else "N/A"
-    next_date     = get_next_trading_day(df_raw.index[-1])
+    # ─── UPDATED LINE ───────────────────────────────
+    next_date     = get_hero_next_date(predictions, TARGET_ETFS)
     etf_color     = ETF_COLORS.get(predicted_etf, "#333")
 
     st.markdown(
@@ -273,125 +232,3 @@ with col_sig:
         unsafe_allow_html=True,
     )
     st.caption(f"Model: Transfer Voting · MA({best_ma})")
-
-with col_exp:
-    st.subheader("Expected Return — All ETFs")
-    if exp_returns:
-        exp_df = (
-            pd.DataFrame.from_dict(exp_returns, orient="index", columns=["er"])
-            .sort_values("er", ascending=True)
-        )
-        fig_bar = go.Figure(go.Bar(
-            x=exp_df["er"] * 100,
-            y=exp_df.index,
-            orientation="h",
-            marker_color=[ETF_COLORS.get(e, "#888") for e in exp_df.index],
-            text=[f"{v*100:.4f}%" for v in exp_df["er"]],
-            textposition="outside",
-        ))
-        fig_bar.update_layout(
-            xaxis_title="Expected MA Diff / Price (%)",
-            height=250, margin=dict(l=0, r=40, t=10, b=30),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-
-# ── OOS METRICS ───────────────────────────────────────────────────────────────
-st.markdown("---")
-st.subheader(f"📊 OOS Performance  ({oos_start.date() if oos_start else '?'} → {oos_end.date() if oos_end else '?'})")
-
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Ann. Return",  f"{metrics.get('ann_return',0)*100:.2f}%")
-m2.metric("Sharpe Ratio", f"{metrics.get('sharpe',0):.3f}")
-m3.metric("Max Drawdown", f"{metrics.get('max_dd',0)*100:.2f}%")
-m4.metric("Win Rate",     f"{metrics.get('win_rate',0)*100:.1f}%")
-m5.metric("# Trades",     str(metrics.get("n_trades", "—")))
-m6.metric("MA Window",    f"MA({best_ma})")
-
-
-# ── EQUITY CURVE ──────────────────────────────────────────────────────────────
-st.markdown("---")
-st.subheader("📉 Equity Curve (OOS Only)")
-
-spy_ret    = df_raw["SPY"].pct_change().fillna(0) if "SPY" in df_raw.columns else None
-oos_mask   = (equity_oos.index >= oos_start) & (equity_oos.index <= oos_end) if oos_start else slice(None)
-
-fig_eq = go.Figure()
-fig_eq.add_trace(go.Scatter(
-    x=equity_oos.index, y=equity_oos["strategy"],
-    name="Strategy", line=dict(color="#1f77b4", width=2),
-))
-if spy_ret is not None and oos_start:
-    spy_oos = spy_ret.loc[(spy_ret.index >= oos_start) & (spy_ret.index <= oos_end)]
-    spy_eq  = (1 + spy_oos).cumprod()
-    if len(spy_eq) > 0:
-        spy_eq = spy_eq / spy_eq.iloc[0] * float(equity_oos["strategy"].iloc[0])
-        fig_eq.add_trace(go.Scatter(
-            x=spy_eq.index, y=spy_eq.values,
-            name="SPY B&H", line=dict(color="#aaa", width=1.5, dash="dot"),
-        ))
-fig_eq.update_layout(
-    height=380, xaxis_title="Date", yaxis_title="Portfolio Value",
-    legend=dict(orientation="h", y=1.02),
-    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-    margin=dict(l=0, r=0, t=30, b=0),
-)
-fig_eq.update_xaxes(showgrid=True, gridcolor="#eee")
-fig_eq.update_yaxes(showgrid=True, gridcolor="#eee")
-st.plotly_chart(fig_eq, use_container_width=True)
-
-
-# ── ALLOCATION PIE ────────────────────────────────────────────────────────────
-st.markdown("---")
-st.subheader("📊 Allocation Breakdown (OOS)")
-
-audit = results.get("audit_trail", pd.DataFrame())
-if not audit.empty and oos_start:
-    audit_oos = audit.loc[audit.index >= oos_start]
-    if not audit_oos.empty and "selected_etf" in audit_oos.columns:
-        counts = audit_oos["selected_etf"].value_counts()
-        col_pie, col_tbl = st.columns([1, 2])
-        with col_pie:
-            fig_pie = go.Figure(go.Pie(
-                labels=counts.index, values=counts.values,
-                marker_colors=[ETF_COLORS.get(e, "#888") for e in counts.index],
-                hole=0.4,
-            ))
-            fig_pie.update_layout(
-                height=280, margin=dict(l=0, r=0, t=10, b=0),
-                paper_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-        with col_tbl:
-            pct = (counts / counts.sum() * 100).round(1)
-            st.dataframe(
-                pct.rename("% Days").reset_index().rename(columns={"index": "ETF"}),
-                hide_index=True, height=260,
-            )
-
-
-# ── TRADE LOG ─────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.subheader("🗒️ Last 20 OOS Trades")
-
-if not audit.empty:
-    audit_oos = audit.loc[audit.index >= oos_start] if oos_start else audit
-    switches  = audit_oos[audit_oos.get("switch_flag", pd.Series(False, index=audit_oos.index))]
-    if switches.empty:
-        switches = audit_oos.tail(20)
-    display_cols = [c for c in ["selected_etf", "expected_return", "signal_z",
-                                 "switch_reason", "in_cash"] if c in switches.columns]
-    st.dataframe(switches.tail(20)[display_cols], use_container_width=True, height=380)
-else:
-    st.info("No trade data available.")
-
-
-# ── FOOTER ────────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.caption(
-    f"P2-ETF-ENTROPY · Transfer Voting · MA({best_ma}) · "
-    f"80/10/10 split from {year_start} · "
-    f"OOS: {oos_start.date() if oos_start else '?'} → {oos_end.date() if oos_end else '?'} · "
-    "Based on: Entropy 2026, 28, 84"
-)
