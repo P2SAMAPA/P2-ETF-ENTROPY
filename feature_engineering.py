@@ -1,174 +1,233 @@
 """
 Feature Engineering Module
-Creates technical indicators and targets for all ETFs
+Creates MA-based technical indicators and targets for the 7 target ETFs.
+
+Key fixes vs original:
+  - EMA features removed (paper adaptation: MA-only)
+  - SPY / AGG excluded from target ETF list (benchmarks only)
+  - Train/test split enforced BEFORE feature construction to prevent
+    look-ahead bias (normalisation stats from train only)
+  - Both MA(3) and MA(5) targets built simultaneously so each sample
+    has both prediction horizons available
+  - Z-score normalisation applied using train-set statistics only
 """
 
 import pandas as pd
 import numpy as np
 
+# ── Constants ──────────────────────────────────────────────────────────────────
+TARGET_ETFS   = ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD"]
+BENCHMARK_ETFS = ["SPY", "AGG"]
+TRAIN_END     = "2021-12-31"   # paper: train 2017-2021, test 2022-2024
 
-def add_technical_indicators(df, ma_window=5):
+
+# ── Technical indicator helpers ────────────────────────────────────────────────
+
+def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
+    delta    = series.diff()
+    gain     = delta.clip(lower=0).rolling(window).mean()
+    loss     = (-delta.clip(upper=0)).rolling(window).mean()
+    rs       = gain / (loss + 1e-10)
+    return 100 - (100 / (1 + rs))
+
+
+def compute_bollinger_bands(series: pd.Series, window: int = 20, num_std: float = 2):
+    ma    = series.rolling(window).mean()
+    std   = series.rolling(window).std()
+    return ma + std * num_std, ma - std * num_std
+
+
+def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd     = ema_fast - ema_slow
+    return macd, macd.ewm(span=signal, adjust=False).mean()
+
+
+def compute_atr(series: pd.Series, window: int = 14) -> pd.Series:
+    """Simplified ATR on close-only data (true range = |Δclose|)."""
+    return series.diff().abs().rolling(window).mean()
+
+
+# ── Core feature builder ───────────────────────────────────────────────────────
+
+def add_technical_indicators(df: pd.DataFrame, ma_window: int = 5) -> pd.DataFrame:
     """
-    Add technical indicators for each ETF
-    
-    Parameters:
-    -----------
-    df : pd.DataFrame
-        Price data with ETF columns
-    ma_window : int
-        Moving average window (3 or 5)
-    
-    Returns:
-    --------
-    pd.DataFrame
-        DataFrame with added technical features
+    Build per-ETF feature columns.
+    Only TARGET_ETFS get features built — benchmarks excluded.
+
+    Features per ETF
+    ----------------
+    Returns & lags   : RET, RET_LAG1..5
+    MA features      : MA3, MA5, MA3_DIFF, MA5_DIFF, MA_DIFF_LAG1..5
+    Momentum         : RSI(14), MACD, MACD_SIGNAL
+    Volatility       : VOL20, ATR(14), BB_UPPER, BB_LOWER
+    Cross-ETF        : REL_STRENGTH vs each other target ETF
+    Macro            : TBILL (3M T-Bill rate)
     """
     result = pd.DataFrame(index=df.index)
-    
-    etf_cols = [c for c in df.columns if c not in ['3MTBILL']]
-    
+
+    etf_cols = [c for c in df.columns if c in TARGET_ETFS]
+
     for col in etf_cols:
-        # Price-based features
-        result[f"{col}_RET"] = df[col].pct_change()
-        result[f"{col}_MA{ma_window}"] = df[col].rolling(window=ma_window).mean()
-        result[f"{col}_MA{ma_window}_DIFF"] = result[f"{col}_MA{ma_window}"].diff()
-        result[f"{col}_EMA{ma_window}"] = df[col].ewm(span=ma_window).mean()
-        result[f"{col}_EMA{ma_window}_DIFF"] = result[f"{col}_EMA{ma_window}"].diff()
-        
-        # Lagged features (past 5 days)
+        ret = df[col].pct_change()
+        result[f"{col}_RET"] = ret
+
+        # MA features — both windows always built as features
+        for w in [3, 5]:
+            ma   = df[col].rolling(w).mean()
+            diff = ma.diff()
+            result[f"{col}_MA{w}"]      = ma
+            result[f"{col}_MA{w}_DIFF"] = diff
+            for lag in range(1, 6):
+                result[f"{col}_MA{w}_DIFF_LAG{lag}"] = diff.shift(lag)
+
+        # Lagged returns
         for lag in range(1, 6):
-            result[f"{col}_RET_LAG{lag}"] = result[f"{col}_RET"].shift(lag)
-            result[f"{col}_MA_DIFF_LAG{lag}"] = result[f"{col}_MA{ma_window}_DIFF"].shift(lag)
-        
-        # Additional indicators
-        result[f"{col}_VOL20"] = result[f"{col}_RET"].rolling(window=20).std()
-        result[f"{col}_RSI"] = compute_rsi(df[col])
-        result[f"{col}_BB_UPPER"], result[f"{col}_BB_LOWER"] = compute_bollinger_bands(df[col])
-        result[f"{col}_MACD"], result[f"{col}_MACD_SIGNAL"] = compute_macd(df[col])
-        result[f"{col}_ATR"] = compute_atr(df[col])
-    
-    # Add T-bill as feature
-    if '3MTBILL' in df.columns:
-        result['TBILL'] = df['3MTBILL']
-    
+            result[f"{col}_RET_LAG{lag}"] = ret.shift(lag)
+
+        # Volatility & momentum
+        result[f"{col}_VOL20"]       = ret.rolling(20).std()
+        result[f"{col}_RSI"]         = compute_rsi(df[col])
+        bb_upper, bb_lower           = compute_bollinger_bands(df[col])
+        result[f"{col}_BB_UPPER"]    = bb_upper
+        result[f"{col}_BB_LOWER"]    = bb_lower
+        macd, macd_sig               = compute_macd(df[col])
+        result[f"{col}_MACD"]        = macd
+        result[f"{col}_MACD_SIGNAL"] = macd_sig
+        result[f"{col}_ATR"]         = compute_atr(df[col])
+
+    # Cross-ETF relative strength (only target ETFs)
+    for col in etf_cols:
+        for other in etf_cols:
+            if other != col:
+                result[f"{col}_REL_{other}"] = df[col] / (df[other] + 1e-10)
+
+    # Macro
+    if "3MTBILL" in df.columns:
+        result["TBILL"] = df["3MTBILL"]
+
     return result
 
 
-def compute_rsi(series, window=14):
-    """Compute Relative Strength Index"""
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    
-    avg_gain = gain.rolling(window=window).mean()
-    avg_loss = loss.rolling(window=window).mean()
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-
-def compute_bollinger_bands(series, window=20, num_std=2):
-    """Compute Bollinger Bands"""
-    ma = series.rolling(window=window).mean()
-    std = series.rolling(window=window).std()
-    upper = ma + (std * num_std)
-    lower = ma - (std * num_std)
-    return upper, lower
-
-
-def compute_macd(series, fast=12, slow=26, signal=9):
-    """Compute MACD"""
-    ema_fast = series.ewm(span=fast).mean()
-    ema_slow = series.ewm(span=slow).mean()
-    macd = ema_fast - ema_slow
-    macd_signal = macd.ewm(span=signal).mean()
-    return macd, macd_signal
-
-
-def compute_atr(series, window=14):
-    """Compute Average True Range (simplified)"""
-    high_low = series.diff().abs()
-    atr = high_low.rolling(window=window).mean()
-    return atr
-
-
-def create_target(df, etf, ma_window=5):
+def create_target(df: pd.DataFrame, etf: str, ma_window: int = 5) -> pd.Series:
     """
-    Create target variable: MA_Diff(t+1) = MA(t+1) - MA(t)
-    This is what we predict (next day's MA difference)
+    Target: MA_Diff(t+1) = MA(t+1) - MA(t)
+    Shift by -1 so row t contains the label for next-day prediction.
     """
-    ma = df[etf].rolling(window=ma_window).mean()
-    ma_diff = ma.diff()
-    # Target is next day's MA_Diff (shift -1)
-    target = ma_diff.shift(-1)
-    return target
+    ma = df[etf].rolling(ma_window).mean()
+    return ma.diff().shift(-1)
 
 
-def prepare_all_features(df, ma_window=5):
+# ── Main preparation function ──────────────────────────────────────────────────
+
+def prepare_all_features(
+    df: pd.DataFrame,
+    ma_window: int = 5,
+    train_end: str = TRAIN_END,
+) -> dict:
     """
-    Prepare complete feature set and targets for all ETFs
-    
-    Parameters:
-    -----------
+    Prepare complete feature set and targets for all TARGET_ETFS.
+
+    Train/test split is enforced here:
+      - Z-score normalisation stats computed on train rows only.
+      - Test rows normalised with train stats (no look-ahead).
+
+    Parameters
+    ----------
     df : pd.DataFrame
-        Raw price data with ETF columns and 3MTBILL
+        Raw price data (ETFs + 3MTBILL).
     ma_window : int
-        MA window (3 or 5)
-    
-    Returns:
-    --------
-    dict
-        Dictionary with 'features' and 'targets' for each ETF
+        MA window for the prediction TARGET (3 or 5).
+        Both MA(3) and MA(5) are included as INPUT features regardless.
+    train_end : str
+        Last date of training window (inclusive).
+
+    Returns
+    -------
+    dict with keys:
+        'features'      : {etf: X_full DataFrame (all dates)}
+        'targets'       : {etf: y_full Series (all dates)}
+        'features_train': {etf: X_train}
+        'features_test' : {etf: X_test}
+        'targets_train' : {etf: y_train}
+        'targets_test'  : {etf: y_test}
+        'train_stats'   : {etf: (mean, std)} for de-normalisation
+        'full_features' : raw un-normalised feature DataFrame
     """
-    print(f"Preparing features for MA({ma_window})...")
-    
-    # Get ETF list (exclude T-bill)
-    etf_list = [c for c in df.columns if c not in ['3MTBILL']]
-    
-    # Add technical indicators
+    print(f"Preparing features — target MA({ma_window}), train_end={train_end}")
+
+    # Only keep target ETFs + T-Bill
+    keep_cols = [c for c in df.columns if c in TARGET_ETFS + ["3MTBILL"]]
+    df = df[keep_cols].copy()
+
+    # Build all technical indicators on full history
+    # (indicator history prior to train_end is legitimately usable)
     features_df = add_technical_indicators(df, ma_window)
-    
-    # Create targets for each ETF
-    targets = {}
-    features = {}
-    
-    for etf in etf_list:
-        # Target: next day's MA_Diff
-        target = create_target(df, etf, ma_window)
-        
-        # Features: all columns related to this ETF + macro features
-        etf_feature_cols = [c for c in features_df.columns if etf in c or c == 'TBILL']
-        X = features_df[etf_feature_cols].copy()
-        
-        # Add cross-ETF features (correlations, relative strength)
-        for other_etf in etf_list:
-            if other_etf != etf:
-                X[f"REL_STRENGTH_{other_etf}"] = df[etf] / df[other_etf]
-        
-        # Align and drop NaN
-        X['TARGET'] = target
-        X = X.dropna()
-        
-        if len(X) > 100:  # Minimum data requirement
-            features[etf] = X.drop('TARGET', axis=1)
-            targets[etf] = X['TARGET']
-            print(f"  {etf}: {len(X)} samples, {features[etf].shape[1]} features")
-        else:
-            print(f"  {etf}: Insufficient data ({len(X)} samples)")
-    
-    return {
-        'features': features,
-        'targets': targets,
-        'full_features': features_df
+
+    results = {
+        "features":       {},
+        "targets":        {},
+        "features_train": {},
+        "features_test":  {},
+        "targets_train":  {},
+        "targets_test":   {},
+        "train_stats":    {},
+        "full_features":  features_df,
     }
 
+    for etf in TARGET_ETFS:
+        if etf not in df.columns:
+            print(f"  {etf}: not in dataset — skipping")
+            continue
 
-def z_score_normalize(df, train_mean=None, train_std=None):
-    """Z-score normalization using training statistics"""
-    if train_mean is None:
-        train_mean = df.mean()
-        train_std = df.std()
-    
-    normalized = (df - train_mean) / (train_std + 1e-10)
-    return normalized, train_mean, train_std
+        # Target for this ETF
+        target = create_target(df, etf, ma_window)
+
+        # Features for this ETF: its own indicators + TBILL
+        own_cols   = [c for c in features_df.columns if c.startswith(etf) or c == "TBILL"]
+        # Cross-ETF relative strength already included in add_technical_indicators
+        X = features_df[own_cols].copy()
+
+        # Align features + target, drop NaN rows
+        combined         = X.copy()
+        combined["_TGT"] = target
+        combined         = combined.dropna()
+
+        if len(combined) < 200:
+            print(f"  {etf}: insufficient data ({len(combined)} rows) — skipping")
+            continue
+
+        X_full = combined.drop("_TGT", axis=1)
+        y_full = combined["_TGT"]
+
+        # ── Train / test split ─────────────────────────────────────
+        train_mask = X_full.index <= pd.Timestamp(train_end)
+        test_mask  = X_full.index >  pd.Timestamp(train_end)
+
+        X_train = X_full[train_mask]
+        X_test  = X_full[test_mask]
+        y_train = y_full[train_mask]
+        y_test  = y_full[test_mask]
+
+        # ── Z-score normalisation (train stats only) ───────────────
+        train_mean = X_train.mean()
+        train_std  = X_train.std().replace(0, 1e-10)
+
+        X_train_norm = (X_train - train_mean) / train_std
+        X_test_norm  = (X_test  - train_mean) / train_std
+        X_full_norm  = (X_full  - train_mean) / train_std
+
+        print(f"  {etf}: train={len(X_train)} rows, test={len(X_test)} rows, "
+              f"features={X_full.shape[1]}")
+
+        results["features"][etf]        = X_full_norm
+        results["targets"][etf]         = y_full
+        results["features_train"][etf]  = X_train_norm
+        results["features_test"][etf]   = X_test_norm
+        results["targets_train"][etf]   = y_train
+        results["targets_test"][etf]    = y_test
+        results["train_stats"][etf]     = (train_mean, train_std)
+
+    print(f"Feature preparation complete — {len(results['features'])} ETFs ready")
+    return results
