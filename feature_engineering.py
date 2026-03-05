@@ -74,110 +74,122 @@ def compute_split_indices(n):
 
 
 def prepare_all_features(df, ma_window=5, year_start=2008):
-    """Prepare features with 80/10/10 split starting from year_start."""
-    # Filter data from year_start onwards
-    df_filtered = df[df.index >= f"{year_start}-01-01"].copy()
-    
-    if len(df_filtered) < 100:  # Minimum data check
-        return {"features": {}, "split_dates": {}, "features_test": {}}
-    
-    # Add technical indicators
-    features_df = add_technical_indicators(df_filtered, ma_window)
-    
-    # Remove rows with NaN values
-    features_df = features_df.dropna()
-    
-    # Align with original df to get targets
-    df_aligned = df_filtered.loc[features_df.index]
-    
-    # Build features dict per ETF
-    features = {}
-    targets = {}
-    for etf in TARGET_ETFS:
-        if etf not in df_aligned.columns:
-            continue
-            
-        # Feature columns for this ETF
-        etf_feature_cols = [c for c in features_df.columns if c.startswith(f"{etf}_") or c == "TBILL"]
-        if len(etf_feature_cols) == 0:
-            continue
-            
-        X = features_df[etf_feature_cols]
-        y = create_target(df_aligned, etf, ma_window)
-        
-        # Align X and y
-        common_idx = X.index.intersection(y.dropna().index)
-        X = X.loc[common_idx]
-        y = y.loc[common_idx]
-        
-        if len(X) < 50:
-            continue
-            
-        features[etf] = X
-        targets[etf] = y
-    
-    if not features:
-        return {"features": {}, "split_dates": {}, "features_test": {}}
-    
-    # Compute 80/10/10 split indices
-    n = len(features[TARGET_ETFS[0]])
-    train_end, val_end = compute_split_indices(n)
-    
-    # Split features and compute dates
-    split_dates = {}
-    features_test = {}
-    
-    for etf in features:
-        X = features[etf]
-        
-        # Get dates for splits
-        all_dates = X.index
-        train_dates = all_dates[:train_end]
-        val_dates = all_dates[train_end:val_end]
-        test_dates = all_dates[val_end:]
-        
-        split_dates[etf] = {
-            "train_end": train_dates[-1] if len(train_dates) > 0 else None,
-            "val_end": val_dates[-1] if len(val_dates) > 0 else None,
-            "oos_start": test_dates[0] if len(test_dates) > 0 else None,
-            "oos_end": test_dates[-1] if len(test_dates) > 0 else None,
-        }
-        
-        # Store test features for get_oos_dates to use
-        features_test[etf] = X.iloc[val_end:]
-    
-    return {
-        "features": features,
-        "targets": targets,
-        "split_dates": split_dates,
-        "features_test": features_test,
-        "train_end": train_end,
-        "val_end": val_end,
+    """
+    Prepare features with 80/10/10 split starting from year_start.
+
+    Returns dict with keys:
+        features, targets                        — full normalised
+        features_train, features_val, features_test
+        targets_train,  targets_val,  targets_test
+        train_stats   {etf: (mean, std)}
+        split_dates   {etf: {train_start, train_end, val_start,
+                              val_end, oos_start, oos_end,
+                              n_train, n_val, n_test}}
+        full_features, year_start
+    """
+    df = df[df.index >= f"{year_start}-01-01"].copy()
+    keep = [c for c in df.columns if c in TARGET_ETFS + ["3MTBILL"]]
+    df   = df[keep]
+
+    if len(df) < 300:
+        return {"features": {}, "split_dates": {}, "features_train": {},
+                "features_val": {}, "features_test": {}, "targets_train": {},
+                "targets_val": {}, "targets_test": {}, "targets": {},
+                "train_stats": {}, "full_features": pd.DataFrame(),
+                "year_start": year_start}
+
+    features_df = add_technical_indicators(df, ma_window)
+
+    results = {
+        "features": {}, "targets": {},
+        "features_train": {}, "features_val": {}, "features_test": {},
+        "targets_train":  {}, "targets_val":  {}, "targets_test":  {},
+        "train_stats": {}, "split_dates": {},
+        "full_features": features_df,
+        "year_start": year_start,
     }
+
+    for etf in TARGET_ETFS:
+        if etf not in df.columns:
+            continue
+
+        target   = create_target(df, etf, ma_window)
+        own_cols = [c for c in features_df.columns if c.startswith(f"{etf}_") or c == "TBILL"]
+        if not own_cols:
+            continue
+
+        X = features_df[own_cols].copy()
+
+        # Align X and y, drop NaN rows
+        combined         = X.copy()
+        combined["_TGT"] = target
+        combined         = combined.dropna()
+
+        if len(combined) < 300:
+            print(f"  {etf}: insufficient data ({len(combined)} rows) — skipping")
+            continue
+
+        X_full = combined.drop("_TGT", axis=1)
+        y_full = combined["_TGT"]
+        n      = len(X_full)
+
+        # ── 80/10/10 split (computed per ETF — no cross-ETF length assumption) ──
+        train_end_idx, val_end_idx = compute_split_indices(n)
+
+        X_train = X_full.iloc[:train_end_idx]
+        X_val   = X_full.iloc[train_end_idx:val_end_idx]
+        X_test  = X_full.iloc[val_end_idx:]
+        y_train = y_full.iloc[:train_end_idx]
+        y_val   = y_full.iloc[train_end_idx:val_end_idx]
+        y_test  = y_full.iloc[val_end_idx:]
+
+        # ── Z-score normalisation — train stats only ──────────────────
+        train_mean = X_train.mean()
+        train_std  = X_train.std().replace(0, 1e-10)
+
+        X_train_n = (X_train - train_mean) / train_std
+        X_val_n   = (X_val   - train_mean) / train_std
+        X_test_n  = (X_test  - train_mean) / train_std
+        X_full_n  = (X_full  - train_mean) / train_std
+
+        # ── split_dates: store as strings for json.dump compatibility ─
+        results["split_dates"][etf] = {
+            "train_start": str(X_train.index[0].date()),
+            "train_end":   str(X_train.index[-1].date()),
+            "val_start":   str(X_val.index[0].date()),
+            "val_end":     str(X_val.index[-1].date()),
+            "oos_start":   str(X_test.index[0].date()),
+            "oos_end":     str(X_test.index[-1].date()),
+            "n_train":     len(X_train),
+            "n_val":       len(X_val),
+            "n_test":      len(X_test),
+        }
+
+        results["features"][etf]       = X_full_n
+        results["targets"][etf]        = y_full
+        results["features_train"][etf] = X_train_n
+        results["features_val"][etf]   = X_val_n
+        results["features_test"][etf]  = X_test_n
+        results["targets_train"][etf]  = y_train
+        results["targets_val"][etf]    = y_val
+        results["targets_test"][etf]   = y_test
+        results["train_stats"][etf]    = (train_mean, train_std)
+
+    print(f"Feature prep complete: {len(results['features'])} ETFs | "
+          f"MA({ma_window}) | year_start={year_start}")
+    return results
 
 
 def get_oos_dates(data_dict):
-    """Return (oos_start, oos_end) as pd.Timestamps from prepared data_dict.
-
-    Corrected to ensure oos_end is the last index of test features.
-    """
-    # Defensive check to prevent TypeError
+    """Return (oos_start, oos_end) as pd.Timestamps."""
     if not isinstance(data_dict, dict):
         return None, None
-    if "split_dates" not in data_dict or data_dict["split_dates"] is None:
+    if not data_dict.get("split_dates"):
         return None, None
-    
     ref = next((e for e in TARGET_ETFS if e in data_dict["split_dates"]), None)
     if ref is None:
         return None, None
-
     sd = data_dict["split_dates"][ref]
     oos_start = pd.Timestamp(sd["oos_start"]) if sd.get("oos_start") else None
-
-    # Use the last index of X_test to get true oos_end
-    if ref in data_dict.get("features_test", {}):
-        oos_end = data_dict["features_test"][ref].index[-1]
-    else:
-        oos_end = pd.Timestamp(sd["oos_end"]) if sd.get("oos_end") else None
-
+    oos_end   = pd.Timestamp(sd["oos_end"])   if sd.get("oos_end")   else None
     return oos_start, oos_end
