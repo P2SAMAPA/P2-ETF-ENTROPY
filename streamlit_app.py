@@ -173,7 +173,7 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
     )
 
     timings["Total"] = sum(timings.values())
-    return results, metrics, equity_oos, timings, oos_start, oos_end
+    return results, metrics, equity_oos, timings, oos_start, oos_end, predictions
 
 
 # ── Load base data + model ────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ best_ma           = model_info["best_ma_window"]
 
 # ── Run pipeline ─────────────────────────────────────────────────────────────
 with st.spinner(f"Running predictions for year_start={year_start}..."):
-    results, metrics, equity_oos, timings, oos_start, oos_end = run_for_year(
+    results, metrics, equity_oos, timings, oos_start, oos_end, predictions = run_for_year(
         df_raw, model, model_info,
         year_start, tsl_pct, tx_cost, z_threshold
     )
