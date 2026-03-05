@@ -1,6 +1,6 @@
 """
 ETF Transfer Voting Engine
-Production Version (OOS-Aligned + EST Clock Corrected)
+Robust Production Version
 """
 
 import streamlit as st
@@ -27,12 +27,7 @@ from metrics import calculate_metrics
 # CONFIG
 # --------------------------------------------------
 
-st.set_page_config(
-    page_title="ETF Transfer Voting Engine",
-    page_icon="📈",
-    layout="wide"
-)
-
+st.set_page_config(page_title="ETF Transfer Voting Engine", layout="wide")
 st.title("📈 ETF Transfer Voting Engine")
 
 HF_REPO = "P2SAMAPA/etf-entropy-dataset"
@@ -40,7 +35,7 @@ ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD"]
 
 
 # --------------------------------------------------
-# EST CLOCK + NEXT NYSE SESSION
+# EST CLOCK
 # --------------------------------------------------
 
 def get_next_nyse_session():
@@ -48,7 +43,6 @@ def get_next_nyse_session():
     now_est = datetime.now(eastern)
 
     nyse = mcal.get_calendar("NYSE")
-
     schedule = nyse.schedule(
         start_date=now_est.date(),
         end_date=now_est.date() + pd.Timedelta(days=10)
@@ -57,20 +51,38 @@ def get_next_nyse_session():
     today = pd.Timestamp(now_est.date())
 
     if today in schedule.index:
-        # If after market close (4 PM EST), use next session
         if now_est.hour >= 16:
             future = schedule.index[schedule.index > today]
             return future[0]
         else:
             return today
     else:
-        # Today not trading day
         future = schedule.index[schedule.index > today]
         return future[0]
 
 
 # --------------------------------------------------
-# SIDEBAR
+# SIDEBAR DATA MANAGEMENT
+# --------------------------------------------------
+
+st.sidebar.header("🔄 Data Management")
+
+metadata = load_metadata()
+
+if metadata:
+    st.sidebar.info(f"Dataset updated till {metadata['last_data_update']}")
+else:
+    st.sidebar.warning("Metadata not found")
+
+if st.sidebar.button("Refresh Dataset"):
+    with st.spinner("Updating dataset..."):
+        incremental_update()
+        st.sidebar.success("Dataset refreshed")
+        st.rerun()
+
+
+# --------------------------------------------------
+# STRATEGY CONTROLS
 # --------------------------------------------------
 
 st.sidebar.header("⚙️ Strategy Controls")
@@ -90,17 +102,15 @@ def load_data():
     return load_dataset()
 
 df = load_data()
-
 df = df[df.index.year >= year_start]
 
 
 # --------------------------------------------------
-# LOAD MODEL + METADATA
+# LOAD MODEL
 # --------------------------------------------------
 
 @st.cache_resource
 def load_model_and_meta():
-
     os.makedirs("artifacts", exist_ok=True)
 
     meta_path = hf_hub_download(
@@ -129,8 +139,19 @@ def load_model_and_meta():
 
 model, model_info = load_model_and_meta()
 
-oos_start = pd.to_datetime(model_info["oos_start_date"])
-oos_end = pd.to_datetime(model_info["oos_end_date"])
+
+# --------------------------------------------------
+# OOS WINDOW SAFE HANDLING
+# --------------------------------------------------
+
+if "oos_start_date" in model_info:
+    oos_start = pd.to_datetime(model_info["oos_start_date"])
+    oos_end = pd.to_datetime(model_info["oos_end_date"])
+else:
+    # fallback: last 10%
+    n = len(df)
+    oos_start = df.index[int(n * 0.9)]
+    oos_end = df.index[-1]
 
 
 # --------------------------------------------------
@@ -143,10 +164,7 @@ features = data_dict["features"]
 common_dates = None
 for etf in ETF_LIST:
     idx = features[etf].index
-    if common_dates is None:
-        common_dates = idx
-    else:
-        common_dates = common_dates.intersection(idx)
+    common_dates = idx if common_dates is None else common_dates.intersection(idx)
 
 common_dates = common_dates.sort_values()
 
@@ -155,11 +173,10 @@ tbill_df = df["3MTBILL"].loc[common_dates]
 
 
 # --------------------------------------------------
-# PREDICTIONS (FULL RANGE)
+# PREDICTIONS
 # --------------------------------------------------
 
 predictions = {}
-
 for etf in ETF_LIST:
     X = features[etf].loc[common_dates]
     preds = model.predict_single_etf(X, etf)
@@ -167,7 +184,7 @@ for etf in ETF_LIST:
 
 
 # --------------------------------------------------
-# BACKTEST (FULL RANGE → SLICE OOS)
+# BACKTEST
 # --------------------------------------------------
 
 engine = StrategyEngine(
@@ -185,118 +202,47 @@ results = run_backtest(
     common_dates
 )
 
-# Slice strictly to OOS window
 equity_curve = results["equity_curve"].loc[oos_start:oos_end]
 returns_oos = results["returns"].loc[oos_start:oos_end]
 risk_free_oos = results["risk_free"].loc[oos_start:oos_end]
-audit_oos = results["audit_trail"]
-audit_oos = audit_oos[
-    (pd.to_datetime(audit_oos["date"]) >= oos_start) &
-    (pd.to_datetime(audit_oos["date"]) <= oos_end)
-]
 
 metrics = calculate_metrics(
     equity_curve["strategy"],
     returns_oos,
     risk_free_oos,
-    audit_oos
+    results["audit_trail"]
 )
 
 
 # --------------------------------------------------
-# TABS
+# DASHBOARD
 # --------------------------------------------------
 
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📋 Audit Trail", "📖 Methodology"])
+st.subheader("Next Allocation")
 
+next_session = get_next_nyse_session()
 
-# ==================================================
-# DASHBOARD
-# ==================================================
+latest_features = {etf: features[etf].iloc[-1:] for etf in ETF_LIST}
+expected_returns = {}
 
-with tab1:
+for etf in ETF_LIST:
+    pred = model.predict_single_etf(latest_features[etf], etf)[0]
+    current_price = df.iloc[-1][etf]
+    expected_return = pred / current_price
+    expected_returns[etf] = expected_return
 
-    next_session = get_next_nyse_session()
+predicted_etf = max(expected_returns, key=expected_returns.get)
 
-    latest_features = {etf: features[etf].iloc[-1:] for etf in ETF_LIST}
+st.markdown(f"### {next_session.date()} → {predicted_etf}")
 
-    expected_returns = {}
+st.markdown("---")
+st.subheader("Equity Curve (OOS Only)")
 
-    for etf in ETF_LIST:
+fig, ax = plt.subplots(figsize=(12, 5))
+ax.plot(equity_curve["strategy"])
+ax.grid(True)
+st.pyplot(fig)
 
-        predicted_ma_diff = model.predict_single_etf(
-            latest_features[etf], etf
-        )[0]
-
-        current_price = df.iloc[-1][etf]
-        expected_price = current_price + predicted_ma_diff
-        expected_return = (expected_price - current_price) / current_price
-
-        expected_returns[etf] = expected_return
-
-    predicted_etf = max(expected_returns, key=expected_returns.get)
-    expected_ret = expected_returns[predicted_etf]
-
-    st.markdown(f"""
-    <div style="background-color:#f4f8fb;
-                padding:35px;
-                border-radius:18px;
-                text-align:center;
-                border:3px solid #1f77b4;">
-        <div style="font-size:18px;margin-bottom:10px;">
-            Next NYSE Session: {next_session.date()}
-        </div>
-        <div style="font-size:54px;font-weight:bold;color:#1f77b4;">
-            {predicted_etf}
-        </div>
-        <div style="font-size:18px;margin-top:10px;">
-            Expected Return: {expected_ret:.2%}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.subheader("Performance Metrics (OOS)")
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-
-    col1.metric("Annualized Return", f"{metrics['annualized_return']:.2%}")
-    col2.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
-    col3.metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
-    col4.metric("Worst Daily Return", f"{metrics['worst_daily_return']:.2%}")
-    col5.metric("Hit Ratio (15d)", f"{metrics['hit_ratio_15d']:.2%}")
-
-    st.markdown("---")
-    st.subheader("Equity Curve (OOS Only)")
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(equity_curve["strategy"], label="Strategy", linewidth=2)
-    ax.legend()
-    ax.grid(True)
-
-    st.pyplot(fig)
-
-
-# ==================================================
-# AUDIT TRAIL (OOS ONLY)
-# ==================================================
-
-with tab2:
-
-    st.subheader("Last 15 Trading Days (OOS)")
-
-    audit_tail = audit_oos.tail(15).copy()
-    st.dataframe(audit_tail, use_container_width=True)
-
-
-# ==================================================
-# METHODOLOGY
-# ==================================================
-
-with tab3:
-
-    st.markdown(f"""
-**Training Window:** {model_info['train_start_date']} → {model_info['train_end_date']}  
-**Validation Window:** {model_info['validation_start_date']} → {model_info['validation_end_date']}  
-**OOS Window:** {model_info['oos_start_date']} → {model_info['oos_end_date']}
-""")
+st.markdown("---")
+st.subheader("Last 15 OOS Trades")
+st.dataframe(results["audit_trail"].tail(15))
