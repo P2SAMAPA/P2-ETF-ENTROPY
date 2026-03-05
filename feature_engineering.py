@@ -92,7 +92,7 @@ def get_oos_dates(data_dict):
     oos_start = pd.Timestamp(sd["oos_start"])
 
     # Use the last index of X_test to get true oos_end
-    if ref in data_dict["features_test"]:
+    if ref in data_dict.get("features_test", {}):
         oos_end = data_dict["features_test"][ref].index[-1]
     else:
         oos_end = pd.Timestamp(sd["oos_end"])  # fallback
