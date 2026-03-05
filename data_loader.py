@@ -87,14 +87,31 @@ def load_metadata():
 
 
 def save_to_hf(file_path, repo_path):
-    api = HfApi(token=os.getenv("HF_TOKEN"))
-    api.upload_file(
-        path_or_fileobj=file_path,
-        path_in_repo=repo_path,
+    """
+    Upload file to HuggingFace using create_commit + bytes.
+    Reads file into memory first — works regardless of working directory.
+    Raises on failure so caller can surface the error.
+    """
+    from huggingface_hub import CommitOperationAdd
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        raise RuntimeError("HF_TOKEN not set — cannot upload to HuggingFace")
+
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
+    api = HfApi(token=token)
+    api.create_commit(
         repo_id=HF_DATASET_REPO,
         repo_type="dataset",
+        token=token,
+        commit_message=f"Update {repo_path} — {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M UTC')}",
+        operations=[CommitOperationAdd(
+            path_in_repo=repo_path,
+            path_or_fileobj=file_bytes,
+        )],
     )
-    print(f"Uploaded {repo_path} to HF")
+    print(f"✅ Uploaded {repo_path} to HF ({len(file_bytes):,} bytes)")
 
 
 def load_dataset():
