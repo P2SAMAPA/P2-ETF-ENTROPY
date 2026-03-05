@@ -63,7 +63,8 @@ def load_from_hf():
         repo_type="dataset"
     )
 
-    model = joblib.load(model_path)
+    model = TransferVotingModel(ETF_LIST, best_ma, artifact_path=None)
+    model.load(model_path)
     raw_df = pd.read_parquet(raw_path)
 
     return raw_df, model, best_ma
