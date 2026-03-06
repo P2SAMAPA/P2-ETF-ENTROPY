@@ -19,8 +19,7 @@ from backtest import run_backtest
 from strategy_engine import StrategyEngine
 from metrics import calculate_metrics
 
-MA_WINDOWS = [2, 3, 4, 5, 7, 10]   # was [3, 5]
-
+MA_WINDOWS = [3, 5, 7]   # was [3, 5]; now reduced to three windows for faster training
 
 def optimize_ma_window(
     etf_list,
