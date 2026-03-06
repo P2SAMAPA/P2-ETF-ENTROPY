@@ -1,5 +1,6 @@
 """
 reseed.py - ONE-TIME script to build complete dataset from 2008.
+Uses Yahoo Finance first, falls back to Stooq if YF fails.
 Run manually: python reseed.py
 """
 import os
@@ -25,11 +26,10 @@ session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 })
 
-def fetch_etf_data(ticker, start, end):
-    """Fetch ETF data with robust retry logic and session reuse."""
-    for attempt in range(6):  # up to 6 attempts
+def fetch_etf_data_yf(ticker, start, end):
+    """Fetch ETF data from Yahoo Finance with robust retry logic."""
+    for attempt in range(6):
         try:
-            # Use the shared session
             df = yf.download(
                 ticker,
                 start=start,
@@ -37,13 +37,13 @@ def fetch_etf_data(ticker, start, end):
                 progress=False,
                 auto_adjust=True,
                 threads=False,
-                session=session  # reuse session with custom headers
+                session=session
             )
             
             if df.empty:
                 raise ValueError(f"No data for {ticker}")
             
-            # Handle MultiIndex columns (same as before)
+            # Handle MultiIndex columns
             if isinstance(df.columns, pd.MultiIndex):
                 df = df['Close']
                 if isinstance(df, pd.DataFrame):
@@ -59,28 +59,66 @@ def fetch_etf_data(ticker, start, end):
                 df = df.squeeze()
             df.name = ticker
             
-            print(f"  ✅ {ticker}: {len(df)} rows")
+            print(f"  ✅ {ticker} (YF): {len(df)} rows")
             return df
             
         except Exception as e:
-            # Check if it's a rate limit error
             err_str = str(e).lower()
             is_rate_limit = any(k in err_str for k in ["rate limit", "too many requests", "429", "ratelimit"])
             
             if is_rate_limit and attempt < 5:
-                # Exponential backoff with jitter: 30s, 60s, 120s, 240s, 480s
                 wait = 30 * (2 ** attempt) + random.randint(5, 15)
-                print(f"  ⚠️ Rate limited on {ticker} (attempt {attempt+1}). Waiting {wait}s...")
+                print(f"  ⚠️ YF rate limited on {ticker} (attempt {attempt+1}). Waiting {wait}s...")
                 time.sleep(wait)
             else:
-                print(f"  ❌ Failed to fetch {ticker} after {attempt+1} attempts: {e}")
-                return None  # return None instead of raising to continue with other tickers
+                print(f"  ❌ YF failed for {ticker} after {attempt+1} attempts: {e}")
+                return None
+    return None
+
+def fetch_etf_data_stooq(ticker, start, end):
+    """
+    Fetch ETF data from Stooq as fallback.
+    Stooq symbol: ticker.lower() + '.us' (e.g., 'spy.us')
+    """
+    stooq_symbol = ticker.lower() + '.us'
+    url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
     
+    for attempt in range(3):
+        try:
+            # Stooq returns CSV with columns: Date,Open,High,Low,Close,Volume
+            df = pd.read_csv(url, parse_dates=['Date'], index_col='Date')
+            if df.empty:
+                raise ValueError(f"No data from Stooq for {ticker}")
+            
+            # Filter by date range (Stooq returns all available data)
+            df = df.sort_index()
+            mask = (df.index >= start) & (df.index <= end)
+            df = df.loc[mask]
+            
+            if df.empty:
+                raise ValueError(f"No data in date range for {ticker} from Stooq")
+            
+            # Use Close price
+            series = df['Close']
+            series.name = ticker
+            series.index = pd.to_datetime(series.index).tz_localize(None)
+            
+            print(f"  ✅ {ticker} (Stooq): {len(series)} rows")
+            return series
+            
+        except Exception as e:
+            if attempt < 2:
+                wait = 5 * (2 ** attempt) + random.randint(1, 5)
+                print(f"  ⚠️ Stooq attempt {attempt+1} failed for {ticker}: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"  ❌ Stooq failed for {ticker} after 3 attempts.")
+                return None
     return None
 
 def main():
     print("=" * 60)
-    print("FULL RESEED FROM 2008-01-01")
+    print("FULL RESEED FROM 2008-01-01 (with Stooq fallback)")
     print("=" * 60)
     
     # 1. Fetch ETF data
@@ -90,14 +128,21 @@ def main():
     
     for ticker in ETF_LIST:
         print(f"\n--- {ticker} ---")
-        series = fetch_etf_data(ticker, START_DATE, END_DATE)
+        # First try Yahoo Finance
+        series = fetch_etf_data_yf(ticker, START_DATE, END_DATE)
+        
+        # If YF fails, try Stooq
+        if series is None:
+            print(f"  🔄 Trying Stooq fallback for {ticker}...")
+            series = fetch_etf_data_stooq(ticker, START_DATE, END_DATE)
+        
         if series is not None:
             etf_data[ticker] = series
         else:
             failed_tickers.append(ticker)
     
     if not etf_data:
-        raise RuntimeError("No ETF data could be fetched. Aborting.")
+        raise RuntimeError("No ETF data could be fetched from any source. Aborting.")
     
     if failed_tickers:
         print(f"\n⚠️ Failed tickers: {failed_tickers} — continuing with {len(etf_data)} tickers.")
@@ -107,7 +152,7 @@ def main():
     print(f"\n📊 ETF DataFrame shape: {etf_df.shape}")
     print(f"   Date range: {etf_df.index[0].date()} to {etf_df.index[-1].date()}")
     
-    # 2. Fetch T-Bill data
+    # 2. Fetch T-Bill data (unchanged)
     print(f"\n📥 Downloading 3-Month T-Bill from FRED...")
     fred = Fred(api_key=os.getenv("FRED_API_KEY"))
     tbill = fred.get_series("DGS3MO", observation_start=START_DATE, observation_end=END_DATE)
