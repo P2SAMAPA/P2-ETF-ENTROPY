@@ -1,11 +1,14 @@
 """
-update_data.py - Daily incremental update script.
-Runs via GitHub Actions to add new data since last update.
+update_data.py - Daily incremental update script with Stooq fallback.
+Fetches new data since last update, using Yahoo Finance first, then Stooq if needed.
 """
 import os
 import json
+import time
+import random
 import pandas as pd
 import yfinance as yf
+import requests
 from fredapi import Fred
 from datetime import datetime, timedelta
 from huggingface_hub import HfApi, hf_hub_download, CommitOperationAdd
@@ -16,11 +19,16 @@ ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "HYG", "VCIT", "LQD", "AGG", "SPY"]
 LOCAL_DATA_FILE = "raw_data.parquet"
 LOCAL_META_FILE = "metadata.json"
 
+# Create a session with a browser-like user-agent to reduce rate limiting
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+})
+
 def download_current_dataset(token):
     """Download current dataset from HF Hub."""
     print("📥 Downloading current dataset from Hugging Face...")
     
-    # Download parquet file
     parquet_path = hf_hub_download(
         repo_id=HF_DATASET_REPO,
         filename="raw_data.parquet",
@@ -29,7 +37,6 @@ def download_current_dataset(token):
     )
     df = pd.read_parquet(parquet_path)
     
-    # Download metadata
     try:
         meta_path = hf_hub_download(
             repo_id=HF_DATASET_REPO,
@@ -40,7 +47,6 @@ def download_current_dataset(token):
         with open(meta_path, 'r') as f:
             metadata = json.load(f)
     except Exception:
-        # Create basic metadata if not found
         metadata = {
             "last_data_update": str(df.index[-1].date()),
             "dataset_version": 1
@@ -48,45 +54,91 @@ def download_current_dataset(token):
     
     return df, metadata
 
-def fetch_new_etf_data(ticker, start_date, end_date):
-    """Fetch data for one ticker from start_date to end_date."""
-    try:
-        df = yf.download(
-            ticker,
-            start=start_date,
-            end=end_date,
-            progress=False,
-            auto_adjust=True,
-            threads=False
-        )
-        
-        if df.empty:
-            return None
-        
-        # Extract Close prices (same logic as reseed)
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df['Close']
-            if isinstance(df, pd.DataFrame):
-                df = df.iloc[:, 0]
-        else:
-            close_cols = [c for c in df.columns if 'Close' in str(c)]
-            if close_cols:
-                df = df[close_cols[0]]
+def fetch_new_etf_data_yf(ticker, start, end):
+    """Fetch ETF data from Yahoo Finance for the given date range."""
+    for attempt in range(4):
+        try:
+            df = yf.download(
+                ticker,
+                start=start,
+                end=end,
+                progress=False,
+                auto_adjust=True,
+                threads=False,
+                session=session
+            )
+            
+            if df.empty:
+                raise ValueError(f"No data for {ticker}")
+            
+            # Handle MultiIndex columns
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df['Close']
+                if isinstance(df, pd.DataFrame):
+                    df = df.iloc[:, 0]
             else:
-                df = df.iloc[:, 0]
-        
-        if isinstance(df, pd.DataFrame):
-            df = df.squeeze()
-        df.name = ticker
-        
-        return df
-    except Exception as e:
-        print(f"    ⚠️ Error fetching {ticker}: {e}")
-        return None
+                close_cols = [c for c in df.columns if 'Close' in str(c)]
+                if close_cols:
+                    df = df[close_cols[0]]
+                else:
+                    df = df.iloc[:, 0]
+            
+            if isinstance(df, pd.DataFrame):
+                df = df.squeeze()
+            df.name = ticker
+            
+            return df
+            
+        except Exception as e:
+            err_str = str(e).lower()
+            is_rate_limit = any(k in err_str for k in ["rate limit", "too many requests", "429", "ratelimit"])
+            
+            if is_rate_limit and attempt < 3:
+                wait = 15 * (2 ** attempt) + random.randint(5, 10)
+                print(f"    ⚠️ YF rate limited on {ticker} (attempt {attempt+1}). Waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"    ❌ YF failed for {ticker}: {e}")
+                return None
+    return None
+
+def fetch_new_etf_data_stooq(ticker, start, end):
+    """Fetch ETF data from Stooq (fallback) for the given date range."""
+    stooq_symbol = ticker.lower() + '.us'
+    url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
+    
+    for attempt in range(3):
+        try:
+            df = pd.read_csv(url, parse_dates=['Date'], index_col='Date')
+            if df.empty:
+                raise ValueError(f"No data from Stooq for {ticker}")
+            
+            # Filter by date range
+            df = df.sort_index()
+            mask = (df.index >= start) & (df.index <= end)
+            df = df.loc[mask]
+            
+            if df.empty:
+                raise ValueError(f"No data in date range for {ticker} from Stooq")
+            
+            series = df['Close']
+            series.name = ticker
+            series.index = pd.to_datetime(series.index).tz_localize(None)
+            return series
+            
+        except Exception as e:
+            if attempt < 2:
+                wait = 5 * (2 ** attempt) + random.randint(1, 5)
+                print(f"    ⚠️ Stooq attempt {attempt+1} failed for {ticker}: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"    ❌ Stooq failed for {ticker} after 3 attempts.")
+                return None
+    return None
 
 def main():
     print("=" * 60)
-    print("DAILY DATA UPDATE")
+    print("DAILY DATA UPDATE (with Stooq fallback)")
     print("=" * 60)
     
     token = os.getenv("HF_TOKEN")
@@ -123,16 +175,19 @@ def main():
     
     for ticker in ETF_LIST:
         print(f"  Processing {ticker}...")
-        series = fetch_new_etf_data(ticker, start_new, end_exclusive)
+        # Try Yahoo Finance first
+        series = fetch_new_etf_data_yf(ticker, start_new, end_exclusive)
+        
+        # If YF fails, try Stooq
+        if series is None:
+            print(f"    🔄 Trying Stooq fallback for {ticker}...")
+            series = fetch_new_etf_data_stooq(ticker, start_new, end_new)  # Stooq uses inclusive end
+        
         if series is not None and not series.empty:
             new_etf_data[ticker] = series
-            print(f"    ✅ {len(series)} new rows")
-    
-    if not new_etf_data:
-        print("⚠️ No new ETF data found.")
-    else:
-        new_etf_df = pd.DataFrame(new_etf_data)
-        print(f"\n📊 New ETF data shape: {new_etf_df.shape}")
+            print(f"    ✅ {len(series)} new rows from {'Stooq' if series is not None else 'YF'}")
+        else:
+            print(f"    ⚠️ No new data for {ticker} from any source.")
     
     # 4. Fetch new T-Bill data
     print("\nFetching new T-Bill data...")
@@ -153,10 +208,8 @@ def main():
         
         # Append new ETF data
         if new_etf_data:
-            for ticker in ETF_LIST:
-                if ticker in new_etf_data:
-                    new_series = new_etf_data[ticker]
-                    updated_df.loc[new_series.index, ticker] = new_series
+            for ticker, series in new_etf_data.items():
+                updated_df.loc[series.index, ticker] = series
         
         # Append new T-Bill data
         if new_tbill_df is not None and not new_tbill_df.empty:
