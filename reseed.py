@@ -1,149 +1,170 @@
 """
-One-time reseed script — run manually to rebuild raw_data.parquet from 2008 to today.
-Usage: python reseed.py
+reseed.py - ONE-TIME script to build complete dataset from 2008.
+Run manually: python reseed.py
 """
 import os
 import json
+import time
 import pandas as pd
 import yfinance as yf
 from fredapi import Fred
+from datetime import datetime, timedelta
 from huggingface_hub import HfApi, CommitOperationAdd
-from datetime import datetime
 
+# --- Configuration ---
 HF_DATASET_REPO = "P2SAMAPA/etf-entropy-dataset"
-ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD", "SPY", "AGG"]
+ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "HYG", "VCIT", "LQD", "AGG", "SPY"]
+START_DATE = "2008-01-01"
+END_DATE = datetime.today().strftime("%Y-%m-%d")
 
-def reseed():
+def fetch_etf_data(ticker, start, end):
+    """Fetch ETF data with retry logic and proper column extraction."""
+    for attempt in range(5):
+        try:
+            # Add a small delay between tickers to avoid rate limiting
+            time.sleep(2 * (attempt + 1))
+            
+            df = yf.download(
+                ticker, 
+                start=start, 
+                end=end,
+                progress=False,
+                auto_adjust=True,
+                threads=False
+            )
+            
+            if df.empty:
+                raise ValueError(f"No data for {ticker}")
+            
+            # Handle both MultiIndex and single index cases
+            if isinstance(df.columns, pd.MultiIndex):
+                # Get the first column of Close prices
+                df = df['Close']
+                if isinstance(df, pd.DataFrame):
+                    df = df.iloc[:, 0]
+            else:
+                # Find the Close column
+                close_cols = [c for c in df.columns if 'Close' in str(c)]
+                if close_cols:
+                    df = df[close_cols[0]]
+                else:
+                    df = df.iloc[:, 0]  # Fallback to first column
+            
+            # Ensure we have a Series with the ticker name
+            if isinstance(df, pd.DataFrame):
+                df = df.squeeze()
+            df.name = ticker
+            
+            print(f"  ✅ {ticker}: {len(df)} rows")
+            return df
+            
+        except Exception as e:
+            print(f"  ⚠️ Attempt {attempt+1} for {ticker} failed: {e}")
+            if attempt == 4:
+                raise
+            time.sleep(10 * (2 ** attempt))  # Exponential backoff
+    
+    return None
+
+def main():
     print("=" * 60)
     print("FULL RESEED FROM 2008-01-01")
     print("=" * 60)
-
-    start_date = "2008-01-01"
-    end_date   = datetime.today().strftime("%Y-%m-%d")
-
-    # ── ETF data ──────────────────────────────────────────────────────
-    print(f"\nDownloading ETF data {start_date} → {end_date}...")
-    from datetime import timedelta, datetime as dt
-    import time
-    end_exclusive = (dt.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    # Download each ticker individually with delay to avoid rate limiting
-    # GitHub Actions IPs are heavily rate-limited by Yahoo when batching
-    frames = {}
+    
+    # 1. Fetch ETF data
+    print(f"\n📥 Downloading ETFs ({START_DATE} to {END_DATE})...")
+    etf_data = {}
+    missing_tickers = []
+    
     for ticker in ETF_LIST:
-        for attempt in range(4):
-            try:
-                print(f"  Downloading {ticker} (attempt {attempt+1})...")
-                df_t = yf.download(
-                    ticker, start=start_date, end=end_exclusive,
-                    auto_adjust=True, progress=False, threads=False
-                )
-                # yfinance returns MultiIndex columns even for single ticker
-                if isinstance(df_t.columns, pd.MultiIndex):
-                    df_t = df_t["Close"]
-                    # Result may be Series or DataFrame depending on version
-                    if isinstance(df_t, pd.DataFrame):
-                        df_t = df_t.iloc[:, 0]  # take first column
-                    df_t.name = ticker
-                else:
-                    # Flat columns — find Close or take first
-                    close_col = next((c for c in df_t.columns
-                                      if str(c).lower() == "close"), df_t.columns[0])
-                    df_t = df_t[close_col]
-                    df_t.name = ticker
-                if not df_t.empty:
-                    frames[ticker] = df_t
-                    print(f"    ✅ {ticker}: {len(df_t)} rows")
-                    time.sleep(2)   # polite pacing between tickers
-                    break
-            except Exception as e:
-                wait = 20 * (2 ** attempt)
-                print(f"    ⚠️  {ticker} attempt {attempt+1} failed: {e}")
-                if attempt < 3:
-                    print(f"    Waiting {wait}s...")
-                    time.sleep(wait)
-
-    if not frames:
-        raise RuntimeError("All ticker downloads failed")
-
-    etf = pd.DataFrame(frames)
-    print(f"ETF data: {etf.shape}  ({etf.index[0].date()} → {etf.index[-1].date()})")
-    missing = [t for t in ETF_LIST if t not in etf.columns]
-    if missing:
-        print(f"  ⚠️  Missing tickers: {missing}")
-
-    # ── T-Bill data ───────────────────────────────────────────────────
-    print(f"\nDownloading T-Bill data {start_date} → {end_date}...")
-    fred  = Fred(api_key=os.getenv("FRED_API_KEY"))
-    tbill = fred.get_series("DGS3MO", observation_start=start_date, observation_end=end_date)
-    tbill = tbill.to_frame("3MTBILL").ffill()
-    print(f"T-Bill data: {tbill.shape}  ({tbill.index[0].date()} → {tbill.index[-1].date()})")
-
-    # ── Merge ─────────────────────────────────────────────────────────
-    df = etf.join(tbill, how="left").ffill().bfill()
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    print(f"\nMerged dataset: {df.shape}  ({df.index[0].date()} → {df.index[-1].date()})")
-
+        try:
+            series = fetch_etf_data(ticker, START_DATE, END_DATE)
+            if series is not None:
+                etf_data[ticker] = series
+            else:
+                missing_tickers.append(ticker)
+        except Exception as e:
+            print(f"  ❌ Failed to fetch {ticker}: {e}")
+            missing_tickers.append(ticker)
+    
+    if not etf_data:
+        raise RuntimeError("No ETF data could be fetched")
+    
+    # Combine into DataFrame
+    etf_df = pd.DataFrame(etf_data)
+    print(f"\n📊 ETF DataFrame shape: {etf_df.shape}")
+    print(f"   Date range: {etf_df.index[0].date()} to {etf_df.index[-1].date()}")
+    
+    # 2. Fetch T-Bill data
+    print(f"\n📥 Downloading 3-Month T-Bill from FRED...")
+    fred = Fred(api_key=os.getenv("FRED_API_KEY"))
+    tbill = fred.get_series("DGS3MO", observation_start=START_DATE, observation_end=END_DATE)
+    tbill_df = tbill.to_frame("3MTBILL").ffill()
+    print(f"   T-Bill rows: {len(tbill_df)}")
+    
+    # 3. Merge datasets
+    full_df = etf_df.join(tbill_df, how='left').ffill().bfill()
+    full_df.index = pd.to_datetime(full_df.index).tz_localize(None)
+    
+    print(f"\n✅ Merged dataset shape: {full_df.shape}")
+    print(f"   Date range: {full_df.index[0].date()} to {full_df.index[-1].date()}")
+    
     # Verify all columns present
-    for col in ETF_LIST + ["3MTBILL"]:
-        status = "✅" if col in df.columns else "❌ MISSING"
-        print(f"  {col}: {status}")
-
-    # ── Save parquet ──────────────────────────────────────────────────
-    df.to_parquet("raw_data.parquet")
-    print(f"\nSaved raw_data.parquet ({os.path.getsize('raw_data.parquet'):,} bytes)")
-
-    # ── Update metadata ───────────────────────────────────────────────
-    last_date = str(df.index[-1].date())
-    metadata  = {
-        "last_data_update":   last_date,
+    all_cols = ETF_LIST + ["3MTBILL"]
+    missing_cols = [c for c in all_cols if c not in full_df.columns]
+    if missing_cols:
+        print(f"⚠️ Warning: Missing columns: {missing_cols}")
+    
+    # 4. Save locally
+    full_df.to_parquet("raw_data.parquet")
+    file_size = os.path.getsize("raw_data.parquet")
+    print(f"\n💾 Saved raw_data.parquet ({file_size:,} bytes)")
+    
+    # 5. Create metadata
+    metadata = {
+        "last_data_update": str(full_df.index[-1].date()),
         "last_training_date": None,
-        "best_ma_window":     None,
-        "dataset_version":    1,
-        "seed_date":          str(datetime.today().date()),
+        "best_ma_window": None,
+        "dataset_version": 1,
+        "seed_date": str(datetime.today().date()),
+        "rows": len(full_df),
+        "columns": list(full_df.columns)
     }
-    # Preserve existing training metadata if present
-    try:
-        from huggingface_hub import hf_hub_download
-        meta_path = hf_hub_download(HF_DATASET_REPO, "metadata.json", repo_type="dataset")
-        with open(meta_path) as f:
-            existing = json.load(f)
-        metadata["last_training_date"] = existing.get("last_training_date")
-        metadata["best_ma_window"]     = existing.get("best_ma_window")
-        metadata["dataset_version"]    = existing.get("dataset_version", 1) + 1
-    except Exception:
-        pass
-
+    
     with open("metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
-    print(f"Metadata: last_data_update = {last_date}")
-
-    # ── Upload both files to HF ───────────────────────────────────────
+    print(f"📝 Created metadata.json")
+    
+    # 6. Upload to Hugging Face
+    print(f"\n📤 Uploading to Hugging Face: {HF_DATASET_REPO}")
     token = os.getenv("HF_TOKEN")
     if not token:
-        raise RuntimeError("HF_TOKEN not set")
-
+        raise RuntimeError("HF_TOKEN environment variable not set")
+    
     api = HfApi(token=token)
-
-    for local_file, repo_file in [("raw_data.parquet", "raw_data.parquet"),
-                                   ("metadata.json",    "metadata.json")]:
+    
+    for local_file, repo_file in [
+        ("raw_data.parquet", "raw_data.parquet"),
+        ("metadata.json", "metadata.json")
+    ]:
         with open(local_file, "rb") as f:
-            file_bytes = f.read()
+            content = f.read()
+        
         api.create_commit(
             repo_id=HF_DATASET_REPO,
             repo_type="dataset",
             token=token,
-            commit_message=f"Reseed {repo_file} — {last_date} ({len(file_bytes):,} bytes)",
+            commit_message=f"Reseed: {repo_file} - {metadata['last_data_update']}",
             operations=[CommitOperationAdd(
                 path_in_repo=repo_file,
-                path_or_fileobj=file_bytes,
+                path_or_fileobj=content
             )],
         )
-        print(f"✅ Uploaded {repo_file} ({len(file_bytes):,} bytes)")
-
+        print(f"  ✅ Uploaded {repo_file}")
+    
     print("\n" + "=" * 60)
-    print(f"RESEED COMPLETE — data covers {df.index[0].date()} → {last_date}")
+    print(f"🎉 RESEED COMPLETE - {len(full_df)} rows, {len(full_df.columns)} columns")
     print("=" * 60)
 
 if __name__ == "__main__":
-    reseed()
+    main()
