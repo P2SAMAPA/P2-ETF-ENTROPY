@@ -185,7 +185,8 @@ def main():
         
         if series is not None and not series.empty:
             new_etf_data[ticker] = series
-            print(f"    ✅ {len(series)} new rows from {'Stooq' if series is not None else 'YF'}")
+            source = "Stooq" if series is not None else "YF"
+            print(f"    ✅ {len(series)} new rows from {source}")
         else:
             print(f"    ⚠️ No new data for {ticker} from any source.")
     
@@ -203,19 +204,35 @@ def main():
     
     # 5. Merge new data with existing
     if new_etf_data or (new_tbill_df is not None and not new_tbill_df.empty):
-        # Start with existing data
-        updated_df = current_df.copy()
-        
-        # Append new ETF data
+        # Build a DataFrame from all new ETF data
         if new_etf_data:
-            for ticker, series in new_etf_data.items():
-                updated_df.loc[series.index, ticker] = series
+            new_etf_df = pd.DataFrame(new_etf_data)
+            # Ensure index is DatetimeIndex
+            new_etf_df.index = pd.to_datetime(new_etf_df.index)
+        else:
+            new_etf_df = pd.DataFrame()
         
-        # Append new T-Bill data
+        # Add T-Bill data if available
         if new_tbill_df is not None and not new_tbill_df.empty:
-            updated_df.loc[new_tbill_df.index, "3MTBILL"] = new_tbill_df["3MTBILL"]
+            new_tbill_df.index = pd.to_datetime(new_tbill_df.index)
+            # Combine ETF and T-Bill data
+            if not new_etf_df.empty:
+                new_combined = new_etf_df.join(new_tbill_df, how='outer')
+            else:
+                new_combined = new_tbill_df
+        else:
+            new_combined = new_etf_df
         
-        # Forward fill any missing values (should not be needed, but safe)
+        # Concatenate with existing data (this properly handles new dates)
+        updated_df = pd.concat([current_df, new_combined])
+        
+        # Remove any duplicate indices (keep last/newest)
+        updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
+        
+        # Sort by date to ensure chronological order
+        updated_df = updated_df.sort_index()
+        
+        # Forward fill any missing values (in case some ETFs have data on days others don't)
         updated_df = updated_df.ffill()
         
         # Update metadata
