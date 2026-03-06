@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 from huggingface_hub import hf_hub_download
 
 from data_loader import load_dataset, load_metadata
-from update_data import incremental_update
+from update_data import main as incremental_update
 from feature_engineering import prepare_all_features, get_oos_dates, TARGET_ETFS
 from strategy_engine import StrategyEngine
 from transfer_voting import TransferVotingModel
