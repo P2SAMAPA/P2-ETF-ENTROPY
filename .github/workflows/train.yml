@@ -20,7 +20,7 @@ on:
 jobs:
   update-and-train:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240   # increased from 120 to allow full training
 
     steps:
       - name: Checkout repository
