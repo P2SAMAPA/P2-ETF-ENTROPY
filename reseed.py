@@ -5,8 +5,10 @@ Run manually: python reseed.py
 import os
 import json
 import time
+import random
 import pandas as pd
 import yfinance as yf
+import requests
 from fredapi import Fred
 from datetime import datetime, timedelta
 from huggingface_hub import HfApi, CommitOperationAdd
@@ -17,40 +19,42 @@ ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "HYG", "VCIT", "LQD", "AGG", "SPY"]
 START_DATE = "2008-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
 
+# Create a session with a browser-like user-agent to reduce rate limiting
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+})
+
 def fetch_etf_data(ticker, start, end):
-    """Fetch ETF data with retry logic and proper column extraction."""
-    for attempt in range(5):
+    """Fetch ETF data with robust retry logic and session reuse."""
+    for attempt in range(6):  # up to 6 attempts
         try:
-            # Add a small delay between tickers to avoid rate limiting
-            time.sleep(2 * (attempt + 1))
-            
+            # Use the shared session
             df = yf.download(
-                ticker, 
-                start=start, 
+                ticker,
+                start=start,
                 end=end,
                 progress=False,
                 auto_adjust=True,
-                threads=False
+                threads=False,
+                session=session  # reuse session with custom headers
             )
             
             if df.empty:
                 raise ValueError(f"No data for {ticker}")
             
-            # Handle both MultiIndex and single index cases
+            # Handle MultiIndex columns (same as before)
             if isinstance(df.columns, pd.MultiIndex):
-                # Get the first column of Close prices
                 df = df['Close']
                 if isinstance(df, pd.DataFrame):
                     df = df.iloc[:, 0]
             else:
-                # Find the Close column
                 close_cols = [c for c in df.columns if 'Close' in str(c)]
                 if close_cols:
                     df = df[close_cols[0]]
                 else:
-                    df = df.iloc[:, 0]  # Fallback to first column
+                    df = df.iloc[:, 0]
             
-            # Ensure we have a Series with the ticker name
             if isinstance(df, pd.DataFrame):
                 df = df.squeeze()
             df.name = ticker
@@ -59,10 +63,18 @@ def fetch_etf_data(ticker, start, end):
             return df
             
         except Exception as e:
-            print(f"  ⚠️ Attempt {attempt+1} for {ticker} failed: {e}")
-            if attempt == 4:
-                raise
-            time.sleep(10 * (2 ** attempt))  # Exponential backoff
+            # Check if it's a rate limit error
+            err_str = str(e).lower()
+            is_rate_limit = any(k in err_str for k in ["rate limit", "too many requests", "429", "ratelimit"])
+            
+            if is_rate_limit and attempt < 5:
+                # Exponential backoff with jitter: 30s, 60s, 120s, 240s, 480s
+                wait = 30 * (2 ** attempt) + random.randint(5, 15)
+                print(f"  ⚠️ Rate limited on {ticker} (attempt {attempt+1}). Waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"  ❌ Failed to fetch {ticker} after {attempt+1} attempts: {e}")
+                return None  # return None instead of raising to continue with other tickers
     
     return None
 
@@ -74,21 +86,21 @@ def main():
     # 1. Fetch ETF data
     print(f"\n📥 Downloading ETFs ({START_DATE} to {END_DATE})...")
     etf_data = {}
-    missing_tickers = []
+    failed_tickers = []
     
     for ticker in ETF_LIST:
-        try:
-            series = fetch_etf_data(ticker, START_DATE, END_DATE)
-            if series is not None:
-                etf_data[ticker] = series
-            else:
-                missing_tickers.append(ticker)
-        except Exception as e:
-            print(f"  ❌ Failed to fetch {ticker}: {e}")
-            missing_tickers.append(ticker)
+        print(f"\n--- {ticker} ---")
+        series = fetch_etf_data(ticker, START_DATE, END_DATE)
+        if series is not None:
+            etf_data[ticker] = series
+        else:
+            failed_tickers.append(ticker)
     
     if not etf_data:
-        raise RuntimeError("No ETF data could be fetched")
+        raise RuntimeError("No ETF data could be fetched. Aborting.")
+    
+    if failed_tickers:
+        print(f"\n⚠️ Failed tickers: {failed_tickers} — continuing with {len(etf_data)} tickers.")
     
     # Combine into DataFrame
     etf_df = pd.DataFrame(etf_data)
