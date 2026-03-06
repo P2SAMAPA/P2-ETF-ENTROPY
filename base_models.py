@@ -4,7 +4,7 @@ Changes vs original:
   - n_samples > 2000 bypass REMOVED — GridSearchCV always runs
   - n_estimators: RF/XGB/LGB 100→300, AdaBoost 50→150
   - Broader param grids: max_depth, learning_rate, min_samples_split
-  - TimeSeriesSplit n_splits: 3→5
+  - TimeSeriesSplit n_splits: 3 (was 5)
   - n_jobs=-1 on GridSearchCV itself for parallel fold execution
 """
 
@@ -65,11 +65,11 @@ def get_base_models():
 def train_base_models(X_train, y_train, artifact_path="artifacts"):
     """
     Train all base models with full GridSearchCV — no sample-size bypass.
-    TimeSeriesSplit(n_splits=5) for proper walk-forward CV.
+    TimeSeriesSplit(n_splits=3) for faster walk-forward CV.
     """
     os.makedirs(artifact_path, exist_ok=True)
 
-    tscv           = TimeSeriesSplit(n_splits=5)
+    tscv           = TimeSeriesSplit(n_splits=3)   # was 5
     models_config  = get_base_models()
     trained_models = {}
 
