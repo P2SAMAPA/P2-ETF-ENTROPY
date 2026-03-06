@@ -1,11 +1,10 @@
 """
-Base Models Module — TUNED
+Base Models Module — TUNED for speed
 Changes vs original:
-  - n_samples > 2000 bypass REMOVED — GridSearchCV always runs
-  - n_estimators: RF/XGB/LGB 100→300, AdaBoost 50→150
-  - Broader param grids: max_depth, learning_rate, min_samples_split
+  - n_estimators reduced from 300 to 100 for RF/XGB/LGB
+  - RandomForest grid reduced to 4 combinations (was 12)
   - TimeSeriesSplit n_splits: 3 (was 5)
-  - n_jobs=-1 on GridSearchCV itself for parallel fold execution
+  - n_jobs=-1 on GridSearchCV for parallel folds
 """
 
 import numpy as np
@@ -22,14 +21,14 @@ import lightgbm as lgb
 def get_base_models():
     return {
         "RandomForest": {
-            "model": RandomForestRegressor(random_state=42, n_jobs=-1, n_estimators=300),
+            "model": RandomForestRegressor(random_state=42, n_jobs=-1, n_estimators=100),  # was 300
             "params": {
-                "max_depth":          [5, 10, 15, None],
-                "min_samples_split":  [2, 5, 10],
+                "max_depth":          [10, None],        # was [5,10,15,None]
+                "min_samples_split":  [2, 5],            # was [2,5,10]
             },
         },
         "XGBoost": {
-            "model": xgb.XGBRegressor(random_state=42, n_jobs=-1, n_estimators=300,
+            "model": xgb.XGBRegressor(random_state=42, n_jobs=-1, n_estimators=100,   # was 300
                                        verbosity=0),
             "params": {
                 "max_depth":    [3, 5, 7],
@@ -38,7 +37,7 @@ def get_base_models():
             },
         },
         "LightGBM": {
-            "model": lgb.LGBMRegressor(random_state=42, n_jobs=-1, n_estimators=300,
+            "model": lgb.LGBMRegressor(random_state=42, n_jobs=-1, n_estimators=100,   # was 300
                                         verbose=-1),
             "params": {
                 "max_depth":    [5, 10, 15],
@@ -64,7 +63,7 @@ def get_base_models():
 
 def train_base_models(X_train, y_train, artifact_path="artifacts"):
     """
-    Train all base models with full GridSearchCV — no sample-size bypass.
+    Train all base models with GridSearchCV.
     TimeSeriesSplit(n_splits=3) for faster walk-forward CV.
     """
     os.makedirs(artifact_path, exist_ok=True)
