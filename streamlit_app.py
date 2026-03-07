@@ -344,31 +344,34 @@ if not audit.empty and oos_start:
                           hide_index=True, height=260)
 
 # ── AUDIT TABLE ───────────────────────────────────────────────────────────────
-st.markdown("---")
-st.subheader("🗒️ OOS Trade Log  (last 20 entries)")
+NEW = """    # Format audit trail for clean display
+    disp = audit_oos.tail(20).copy()
 
-if not audit.empty and oos_start:
-    audit_oos = audit.loc[audit.index >= oos_start].copy()
-
-    # Strip timestamp — date only
-    audit_oos.index = pd.to_datetime(audit_oos.index).normalize().date
-
-    # Format actual_return for display
-    # actual_return is already in % from backtest.py
-    # CASH rows show T-Bill daily return (computed in backtest) — already included
-    if "actual_return" in audit_oos.columns:
-        audit_oos["return_%"] = audit_oos["actual_return"].apply(
-            lambda x: f"{x:.4f}%" if pd.notna(x) else "—"
+    if "expected_return" in disp.columns:
+        disp["exp_ret_%"] = disp["expected_return"].apply(
+            lambda x: f"{x:.4f}%" if pd.notna(x) and x != 0 else "—"
+        )
+    if "signal_z" in disp.columns:
+        disp["z_score"] = disp["signal_z"].apply(
+            lambda x: f"{x:.2f}" if pd.notna(x) else "—"
+        )
+    if "switch_reason" in disp.columns:
+        disp["reason"] = disp["switch_reason"].replace("", "—")
+    if "switch_flag" in disp.columns:
+        disp["switch"] = disp["switch_flag"].apply(lambda x: "✅" if x else "")
+    if "in_cash" in disp.columns:
+        disp["cash"] = disp["in_cash"].apply(lambda x: "CASH" if x else "")
+    if "actual_return" in disp.columns:
+        disp["return_%"] = disp["actual_return"].apply(
+            lambda x: f"{x*100:.4f}%" if pd.notna(x) else "—"
         )
 
     display_cols = [c for c in
-                    ["selected_etf", "return_%", "expected_return",
-                     "z_score", "switch_flag", "switch_reason", "in_cash"]
-                    if c in audit_oos.columns]
+                    ["selected_etf", "return_%", "exp_ret_%",
+                     "z_score", "switch", "reason", "cash"]
+                    if c in disp.columns]
 
-    st.dataframe(audit_oos.tail(20)[display_cols], use_container_width=True, height=400)
-else:
-    st.info("No trade data available.")
+    st.dataframe(disp[display_cols], use_container_width=True, height=400)"""
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("---")
