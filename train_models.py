@@ -41,7 +41,9 @@ def upload_artifacts_to_hf(artifact_path: str, token: str):
 
     operations = []
     for local_path in files:
-        repo_path = local_path  # mirrors local path in HF repo
+        # streamlit_app.py fetches from "models/" in the HF repo
+        filename  = os.path.basename(local_path)
+        repo_path = f"models/{filename}"
         with open(local_path, "rb") as f:
             content = f.read()
         operations.append(
