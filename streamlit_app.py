@@ -49,10 +49,10 @@ if st.sidebar.button("🔄 Refresh Dataset"):
 
 st.sidebar.header("⚙️ Strategy Controls")
 st.sidebar.caption("Changing **Start Year** re-splits 80/10/10 and re-runs predictions.")
-year_start  = st.sidebar.slider("Start Year",             2008, 2022, 2012)
-tsl_pct     = st.sidebar.slider("Trailing Stop Loss (%)",   10,   25,   15)
-tx_cost     = st.sidebar.slider("Transaction Cost (bps)",    10,   75,   25)
-z_threshold = st.sidebar.slider("Z-Score Re-entry",        0.50, 2.00, 1.00, step=0.05)
+year_start  = st.sidebar.slider("Start Year",             2008, 2023, 2015)
+tsl_pct     = st.sidebar.slider("Trailing Stop Loss (%)",   10,   25,   12)
+tx_cost     = st.sidebar.slider("Transaction Cost (bps)",    10,   25,   12)
+z_threshold = st.sidebar.slider("Z-Score Re-entry",        0.50, 2.00, 0.70, step=0.05)
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
