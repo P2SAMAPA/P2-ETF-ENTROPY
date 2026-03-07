@@ -1,5 +1,4 @@
 name: ETF Entropy Pipeline
-
 on:
   schedule:
     # Daily data update: Mon-Fri at 8pm EST (1am UTC next day)
@@ -16,12 +15,16 @@ on:
         options:
           - 'true'
           - 'false'
+      start_year:
+        description: 'Start year for training (e.g. 2008, 2012, 2019)'
+        required: false
+        default: '2012'
+        type: string
 
 jobs:
   update-and-train:
     runs-on: ubuntu-latest
-    timeout-minutes: 240   # increased from 120 to allow full training
-
+    timeout-minutes: 240
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,7 +45,6 @@ jobs:
         run: python update_data.py
 
       # ── Weekly or manual: full retraining ───────────────────────────
-      # Fix: github.event.schedule matches the full cron string exactly
       - name: Weekly Full Retraining
         if: >
           github.event.schedule == '0 4 * * 0' ||
@@ -50,15 +52,13 @@ jobs:
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2012' }}
         run: |
-          echo "Starting full retraining..."
+          echo "Starting full retraining for year $TRAINING_START_YEAR..."
           python train_models.py
           echo "Training complete."
 
       # ── Commit best_model.json back to repo for reference ───────────
-      # (train_models.py already uploads the full model to HF —
-      #  this just keeps a lightweight copy in the repo for the
-      #  'Update best model info' commit shown in GitHub UI)
       - name: Commit model info to GitHub
         if: >
           github.event.schedule == '0 4 * * 0' ||
