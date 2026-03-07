@@ -19,7 +19,7 @@ from backtest import run_backtest
 from strategy_engine import StrategyEngine
 from metrics import calculate_metrics
 
-MA_WINDOWS = [3, 5, 7]   # was [3, 5]; now reduced to three windows for faster training
+MA_WINDOWS = [3, 5]   # reduced to 2 windows for speed — saves ~33% training time
 
 
 def optimize_ma_window(
