@@ -1,15 +1,19 @@
 """
-ETF Transfer Voting Engine — Streamlit App (Option B)
+ETF Transfer Voting Engine — Streamlit App
+Per-year model loading: each start year has its own trained model in HF.
+If no model exists for selected year today, triggers GitHub Actions retraining.
 """
 
 import os
 import json
 import time
+import datetime
+import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, list_repo_files
 
 from data_loader import load_dataset, load_metadata
 from update_data import main as incremental_update
@@ -22,61 +26,113 @@ from utils import get_hero_next_date, get_oos_index
 
 st.set_page_config(page_title="ETF Transfer Voting Engine", page_icon="📈", layout="wide")
 
-HF_REPO    = "P2SAMAPA/etf-entropy-dataset"
-ETF_COLORS = {
+HF_REPO      = "P2SAMAPA/etf-entropy-dataset"
+GITHUB_REPO  = "P2SAMAPA/P2-ETF-ENTROPY"
+ETF_COLORS   = {
     "TLT": "#1f77b4", "VNQ": "#ff7f0e", "GLD": "#ffd700",
     "SLV": "#aec7e8", "VCIT": "#2ca02c", "HYG": "#d62728",
     "LQD": "#9467bd", "CASH": "#7f7f7f",
 }
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.title("📈 ETF Entropy Engine")
-st.sidebar.header("🔄 Data Management")
-metadata = load_metadata()
-if metadata:
-    st.sidebar.info(f"Data updated: **{metadata.get('last_data_update', '?')}**")
-    if metadata.get("last_training_date"):
-        st.sidebar.caption(f"Last trained: {metadata['last_training_date']}")
-else:
-    st.sidebar.warning("Metadata not found")
 
-if st.sidebar.button("🔄 Refresh Dataset"):
-    with st.spinner("Updating dataset..."):
-        incremental_update()
-        st.cache_data.clear()
-    st.sidebar.success("Dataset refreshed ✅")
-    st.rerun()
+# ── GitHub Actions trigger ────────────────────────────────────────────────────
 
-st.sidebar.header("⚙️ Strategy Controls")
-st.sidebar.caption("Changing **Start Year** re-splits 80/10/10 and re-runs predictions.")
-year_start  = st.sidebar.slider("Start Year",             2008, 2023, 2015)
-tsl_pct     = st.sidebar.slider("Trailing Stop Loss (%)",   10,   25,   12)
-tx_cost     = st.sidebar.slider("Transaction Cost (bps)",    10,   25,   12)
-z_threshold = st.sidebar.slider("Z-Score Re-entry",        0.50, 2.00, 0.70, step=0.05)
+def trigger_github_training(start_year: int) -> bool:
+    """Trigger GitHub Actions workflow for the given start year."""
+    token = st.secrets.get("GH_PAT", "")
+    if not token:
+        st.error("GH_PAT not found in Streamlit secrets. Cannot trigger retraining.")
+        return False
+    url  = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/train.yml/dispatches"
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept":        "application/vnd.github+json",
+        },
+        json={
+            "ref": "main",
+            "inputs": {
+                "run_training": "true",
+                "start_year":   str(start_year),
+            },
+        },
+        timeout=15,
+    )
+    return resp.status_code == 204
 
 
-# ── Loaders ───────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Loading dataset...")
-def _load_raw():
-    return load_dataset()
+# ── HF model availability check ───────────────────────────────────────────────
+
+@st.cache_data(ttl=120, show_spinner=False)
+def check_model_available(start_year: int) -> bool:
+    """Returns True if models/year_XXXX/best_model.json exists in HF dataset."""
+    try:
+        hf_hub_download(
+            repo_id    = HF_REPO,
+            filename   = f"models/year_{start_year}/best_model.json",
+            repo_type  = "dataset",
+            local_dir  = f"artifacts/year_{start_year}",
+        )
+        return True
+    except Exception:
+        return False
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def list_trained_years() -> list:
+    """Return list of years that have a trained model in HF."""
+    try:
+        files   = list(list_repo_files(repo_id=HF_REPO, repo_type="dataset"))
+        years   = set()
+        for f in files:
+            # e.g. models/year_2012/best_model.json
+            parts = f.split("/")
+            if len(parts) >= 2 and parts[0] == "models" and parts[1].startswith("year_"):
+                try:
+                    years.add(int(parts[1].replace("year_", "")))
+                except ValueError:
+                    pass
+        return sorted(years)
+    except Exception:
+        return []
+
+
+# ── Model loader ──────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner="Loading model...")
-def _load_model():
-    os.makedirs("artifacts", exist_ok=True)
-    meta_path = hf_hub_download(repo_id=HF_REPO, filename="models/best_model.json",
-                                 repo_type="dataset", local_dir="artifacts")
+def _load_model_for_year(start_year: int):
+    local_dir  = f"artifacts/year_{start_year}"
+    os.makedirs(local_dir, exist_ok=True)
+    meta_path  = hf_hub_download(
+        repo_id   = HF_REPO,
+        filename  = f"models/year_{start_year}/best_model.json",
+        repo_type = "dataset",
+        local_dir = local_dir,
+    )
     with open(meta_path) as f:
         model_info = json.load(f)
     best_ma    = model_info["best_ma_window"]
-    model_path = hf_hub_download(repo_id=HF_REPO,
-                                  filename=f"models/transfer_voting_MA{best_ma}.pkl",
-                                  repo_type="dataset", local_dir="artifacts")
-    model = TransferVotingModel(TARGET_ETFS, best_ma, "artifacts")
+    model_path = hf_hub_download(
+        repo_id   = HF_REPO,
+        filename  = f"models/year_{start_year}/transfer_voting_MA{best_ma}.pkl",
+        repo_type = "dataset",
+        local_dir = local_dir,
+    )
+    model = TransferVotingModel(TARGET_ETFS, best_ma, local_dir)
     model.load(model_path)
     return model, model_info
 
 
+# ── Dataset loader ────────────────────────────────────────────────────────────
+
+@st.cache_data(show_spinner="Loading dataset...")
+def _load_raw():
+    return load_dataset()
+
+
 # ── Core pipeline ─────────────────────────────────────────────────────────────
+
 def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_threshold):
     timings = {}
     best_ma = model_info["best_ma_window"]
@@ -98,11 +154,7 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
         pred_raw = model.predict_all_etfs(X_dict)
     except ValueError as e:
         if "feature names" in str(e).lower() or "feature_names" in str(e).lower():
-            raise RuntimeError(
-                "MODEL_STALE: The loaded model was trained with a different feature set "
-                "than the current feature_engineering.py produces. "
-                "Please trigger a retrain in GitHub Actions to rebuild the .pkl files."
-            ) from e
+            raise RuntimeError("MODEL_STALE") from e
         raise
     predictions = {
         etf: pd.Series(preds, index=X_dict[etf].index)
@@ -118,8 +170,8 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
     price_aligned = price_df.loc[price_df.index.isin(common_dates)]
     tbill_aligned = tbill_series.loc[tbill_series.index.isin(common_dates)]
 
-    engine = StrategyEngine(TARGET_ETFS, tsl_pct=tsl_pct,
-                             transaction_cost_bps=tx_cost, z_score_threshold=z_threshold)
+    engine  = StrategyEngine(TARGET_ETFS, tsl_pct=tsl_pct,
+                              transaction_cost_bps=tx_cost, z_score_threshold=z_threshold)
     results = run_backtest(predictions, price_aligned, tbill_aligned, engine, common_dates)
     timings["Backtest"] = round(time.time() - t, 1)
 
@@ -168,10 +220,101 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
     return results, metrics, equity_oos, timings, oos_start, oos_end, data_dict, predictions
 
 
-# ── Load + run ────────────────────────────────────────────────────────────────
-df_raw            = _load_raw()
-model, model_info = _load_model()
-best_ma           = model_info["best_ma_window"]
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.sidebar.title("📈 ETF Entropy Engine")
+st.sidebar.header("🔄 Data Management")
+metadata = load_metadata()
+if metadata:
+    st.sidebar.info(f"Data updated: **{metadata.get('last_data_update', '?')}**")
+    if metadata.get("last_training_date"):
+        st.sidebar.caption(f"Last trained: {metadata['last_training_date']}")
+else:
+    st.sidebar.warning("Metadata not found")
+
+if st.sidebar.button("🔄 Refresh Dataset"):
+    with st.spinner("Updating dataset..."):
+        incremental_update()
+        st.cache_data.clear()
+    st.sidebar.success("Dataset refreshed ✅")
+    st.rerun()
+
+st.sidebar.header("⚙️ Strategy Controls")
+year_start  = st.sidebar.slider("Start Year",             2008, 2022, 2015)
+tsl_pct     = st.sidebar.slider("Trailing Stop Loss (%)",   10,   25,   12)
+tx_cost     = st.sidebar.slider("Transaction Cost (bps)",    10,   25,   12)
+z_threshold = st.sidebar.slider("Z-Score Re-entry",        0.50, 2.00, 0.70, step=0.05)
+
+# Show which years already have trained models
+trained_years = list_trained_years()
+if trained_years:
+    st.sidebar.markdown("---")
+    st.sidebar.caption(f"✅ Trained years: {', '.join(str(y) for y in trained_years)}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODEL AVAILABILITY CHECK — trigger Actions if needed
+# ══════════════════════════════════════════════════════════════════════════════
+
+df_raw = _load_raw()
+
+model_ready = check_model_available(year_start)
+
+if not model_ready:
+    st.title("📈 ETF Transfer Voting Engine")
+    st.warning(
+        f"⏳ **No trained model found for start year {year_start}.**\n\n"
+        f"Click below to trigger a ~25 minute training run. "
+        f"This page will auto-refresh every 30 seconds until the model is ready."
+    )
+
+    col_btn, col_status = st.columns([1, 3])
+    with col_btn:
+        if st.button(f"🚀 Train model for {year_start}", type="primary"):
+            triggered = trigger_github_training(year_start)
+            if triggered:
+                st.success("✅ Training job triggered! Refreshing every 30s...")
+                st.session_state["training_triggered"] = True
+            else:
+                st.error("❌ Failed to trigger training. Check GH_PAT secret.")
+
+    with col_status:
+        if st.session_state.get("training_triggered"):
+            st.info("🔄 Training in progress (~25 mins). Page auto-refreshes every 30s.")
+
+    # Show already-trained years as quick links
+    if trained_years:
+        st.markdown("---")
+        st.subheader("📋 Available trained years — select one to view results immediately")
+        cols = st.columns(len(trained_years))
+        for col, yr in zip(cols, trained_years):
+            col.metric(f"Year {yr}", "✅ Ready")
+        st.info(f"Move the **Start Year** slider to one of: {trained_years} to see results now.")
+
+    # Auto-refresh every 30 seconds while waiting
+    st.markdown(
+        """
+        <script>
+        setTimeout(function() { window.location.reload(); }, 30000);
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODEL LOADED — run pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+
+try:
+    model, model_info = _load_model_for_year(year_start)
+    best_ma           = model_info["best_ma_window"]
+except Exception as e:
+    st.error(f"❌ Failed to load model for year {year_start}: {e}")
+    st.stop()
 
 try:
     with st.spinner(f"Computing — year_start={year_start}, MA({best_ma})..."):
@@ -182,10 +325,8 @@ try:
 except RuntimeError as e:
     if "MODEL_STALE" in str(e):
         st.error(
-            "⚠️ **Model is stale** — the saved `.pkl` was trained with an older "
-            "feature set and does not match the current code.\n\n"
-            "**Fix:** Go to GitHub Actions → Run workflow to trigger a retrain. "
-            "The app will work once the new model is pushed to HuggingFace."
+            "⚠️ **Model is stale** — feature set mismatch.\n\n"
+            "Trigger a retrain via GitHub Actions for this year."
         )
         st.stop()
     raise
@@ -198,14 +339,17 @@ oos_label = (f"{oos_start.date()} → {oos_end.date()}" if oos_start and oos_end
 
 # ── PAGE TITLE ────────────────────────────────────────────────────────────────
 st.title("📈 ETF Transfer Voting Engine")
-st.caption(f"Transfer Voting · 7 ETFs · MA({best_ma}) · 80/10/10 from {year_start} · OOS: {oos_label}")
+run_date_display = model_info.get("run_date", model_info.get("last_trained", "N/A"))[:10]
+st.caption(
+    f"Transfer Voting · 7 ETFs · MA({best_ma}) · "
+    f"Trained from {year_start} · Run: {run_date_display} · OOS: {oos_label}"
+)
 
 # ── TIMING ────────────────────────────────────────────────────────────────────
 with st.expander("⏱ Computation timing", expanded=False):
     cols = st.columns(len(timings))
     for col, (lbl, sec) in zip(cols, timings.items()):
         col.metric(lbl, f"{sec}s")
-    st.caption(f"Model last trained: **{model_info.get('last_trained','N/A')[:10]}**")
 
 # ── SPLIT DETAILS ─────────────────────────────────────────────────────────────
 with st.expander("📅 80/10/10 Split Details", expanded=False):
@@ -237,7 +381,6 @@ with col_sig:
         except Exception:
             exp_returns[etf] = 0.0
 
-    # Respect ALL_NEGATIVE cash rule for next allocation display
     all_negative  = all(v < 0 for v in exp_returns.values()) if exp_returns else False
     predicted_etf = "CASH" if all_negative else (
         max(exp_returns, key=exp_returns.get) if exp_returns else "N/A"
@@ -252,7 +395,7 @@ with col_sig:
         f"{predicted_etf}</span><br>"
         f"<span style='color:#888;font-size:0.9rem'>{next_date}</span>"
         f"</div>", unsafe_allow_html=True)
-    st.caption(f"Model: Transfer Voting · MA({best_ma})")
+    st.caption(f"Model trained from {year_start} · MA({best_ma})")
 
 with col_exp:
     st.subheader("Expected Return — All ETFs")
@@ -348,11 +491,7 @@ st.subheader("🗒️ OOS Trade Log  (last 20 entries)")
 
 if not audit.empty and oos_start:
     audit_oos = audit.loc[audit.index >= oos_start].copy()
-
-    # Strip timestamp — date only
     audit_oos.index = pd.to_datetime(audit_oos.index).normalize().date
-
-    # Format columns for clean display
     disp = audit_oos.tail(20).copy()
 
     if "actual_return" in disp.columns:
@@ -380,12 +519,14 @@ if not audit.empty and oos_start:
                     ["selected_etf", "return_%", "exp_ret_%",
                      "z_score", "switch", "reason", "cash"]
                     if c in disp.columns]
-
     st.dataframe(disp[display_cols], use_container_width=True, height=400)
 else:
     st.info("No trade data available.")
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption(f"P2-ETF-ENTROPY · Transfer Voting · MA({best_ma}) · "
-           f"80/10/10 from {year_start} · OOS: {oos_label} · Entropy 2026, 28, 84")
+st.caption(
+    f"P2-ETF-ENTROPY · Transfer Voting · MA({best_ma}) · "
+    f"Trained from {year_start} · Run: {run_date_display} · "
+    f"OOS: {oos_label} · Entropy 2026, 28, 84"
+)
