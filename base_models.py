@@ -1,18 +1,18 @@
 """
-Base Models Module — TUNED for speed
-Changes vs original:
-  - n_estimators reduced from 300 to 100 for RF/XGB/LGB
-  - RandomForest grid reduced to 4 combinations (was 12)
-  - TimeSeriesSplit n_splits: 3 (was 5)
-  - n_jobs=-1 on GridSearchCV for parallel folds
+Base Models Module — SPEED OPTIMISED
+Changes vs previous:
+  - Dropped AdaBoost and DecisionTree (slowest to tune, weakest signal)
+  - RandomForest: n_estimators 100→50, grid 4→2 combos
+  - XGBoost: n_estimators 100→50, grid 12→4 combos
+  - LightGBM: n_estimators 100→50, grid 12→4 combos
+  - TimeSeriesSplit n_splits: 3→2
+  - Result: ~5x faster than previous version
 """
-
 import numpy as np
 import os
 import joblib
 
-from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
-from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 import xgboost as xgb
 import lightgbm as lgb
@@ -21,41 +21,31 @@ import lightgbm as lgb
 def get_base_models():
     return {
         "RandomForest": {
-            "model": RandomForestRegressor(random_state=42, n_jobs=-1, n_estimators=100),  # was 300
+            "model": RandomForestRegressor(
+                random_state=42, n_jobs=-1, n_estimators=50
+            ),
             "params": {
-                "max_depth":          [10, None],        # was [5,10,15,None]
-                "min_samples_split":  [2, 5],            # was [2,5,10]
+                "max_depth": [10, None],   # 2 combos only
             },
         },
         "XGBoost": {
-            "model": xgb.XGBRegressor(random_state=42, n_jobs=-1, n_estimators=100,   # was 300
-                                       verbosity=0),
+            "model": xgb.XGBRegressor(
+                random_state=42, n_jobs=-1, n_estimators=50,
+                verbosity=0
+            ),
             "params": {
-                "max_depth":    [3, 5, 7],
-                "learning_rate":[0.05, 0.1],
-                "subsample":    [0.8, 1.0],
+                "max_depth":     [3, 5],       # 2×2 = 4 combos
+                "learning_rate": [0.05, 0.1],
             },
         },
         "LightGBM": {
-            "model": lgb.LGBMRegressor(random_state=42, n_jobs=-1, n_estimators=100,   # was 300
-                                        verbose=-1),
+            "model": lgb.LGBMRegressor(
+                random_state=42, n_jobs=-1, n_estimators=50,
+                verbose=-1
+            ),
             "params": {
-                "max_depth":    [5, 10, 15],
-                "learning_rate":[0.05, 0.1],
-                "num_leaves":   [31, 63],
-            },
-        },
-        "AdaBoost": {
-            "model": AdaBoostRegressor(random_state=42, n_estimators=150),
-            "params": {
-                "learning_rate": [0.05, 0.1, 0.5, 1.0],
-            },
-        },
-        "DecisionTree": {
-            "model": DecisionTreeRegressor(random_state=42),
-            "params": {
-                "max_depth":         [5, 10, 15],
-                "min_samples_split": [2, 5, 10],
+                "max_depth":     [5, 10],      # 2×2 = 4 combos
+                "learning_rate": [0.05, 0.1],
             },
         },
     }
@@ -63,13 +53,13 @@ def get_base_models():
 
 def train_base_models(X_train, y_train, artifact_path="artifacts"):
     """
-    Train all base models with GridSearchCV.
-    TimeSeriesSplit(n_splits=3) for faster walk-forward CV.
+    Train base models with GridSearchCV.
+    TimeSeriesSplit(n_splits=2) for maximum speed while still walk-forward.
     """
     os.makedirs(artifact_path, exist_ok=True)
 
-    tscv           = TimeSeriesSplit(n_splits=3)   # was 5
-    models_config  = get_base_models()
+    tscv          = TimeSeriesSplit(n_splits=2)
+    models_config = get_base_models()
     trained_models = {}
 
     for name, cfg in models_config.items():
