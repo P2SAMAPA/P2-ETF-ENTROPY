@@ -93,7 +93,7 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
     tbill_series = df_raw["3MTBILL"]
 
     t = time.time()
-    X_dict = data_dict["features"]   # full dates incl. last row
+    X_dict = data_dict["features"]
     try:
         pred_raw = model.predict_all_etfs(X_dict)
     except ValueError as e:
@@ -133,13 +133,11 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
     if equity_oos.empty:
         return None, None, None, timings, oos_start, oos_end, data_dict, predictions
 
-    # Extract strategy Series for metrics
     equity_series = (equity_oos["strategy"]
                      if isinstance(equity_oos, pd.DataFrame) else equity_oos)
 
     raw_metrics = calculate_metrics(equity_series, returns_oos, rf_oos, results["audit_trail"])
 
-    # Normalise to consistent short keys regardless of what calculate_metrics returns
     metrics = {
         "ann_return":  raw_metrics.get("annualized_return",  raw_metrics.get("ann_return",  0)),
         "sharpe":      raw_metrics.get("sharpe_ratio",       raw_metrics.get("sharpe",       0)),
@@ -153,7 +151,6 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
         "hit_ratio":   raw_metrics.get("hit_ratio_15d",      None),
     }
 
-    # Derive switch count from audit trail (switch_flag column)
     audit = results.get("audit_trail", pd.DataFrame())
     if not audit.empty and oos_start:
         oos_audit = audit.loc[audit.index >= oos_start]
@@ -162,7 +159,6 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
             n_days                   = len(oos_audit)
             metrics["avg_hold_days"] = round(n_days / max(metrics["n_switches"], 1), 1)
         else:
-            # Derive from selected_etf changes
             etf_series = oos_audit.get("selected_etf", pd.Series(dtype=str))
             switches   = int((etf_series != etf_series.shift(1)).sum()) - 1
             metrics["n_switches"]    = max(switches, 0)
@@ -235,15 +231,19 @@ with col_sig:
         if etf not in X_latest:
             continue
         try:
-            pred = model.predict_single_etf(X_latest[etf], etf, source_feature_dict=X_latest)[0]
+            pred  = model.predict_single_etf(X_latest[etf], etf, source_feature_dict=X_latest)[0]
             price = float(df_raw[etf].iloc[-1])
-            exp_returns[etf] = pred / price if price > 0 else 0.0
+            exp_returns[etf] = pred / price * 100.0 if price > 0 else 0.0
         except Exception:
             exp_returns[etf] = 0.0
 
-    predicted_etf = max(exp_returns, key=exp_returns.get) if exp_returns else "N/A"
-    next_date     = get_hero_next_date()
-    etf_color     = ETF_COLORS.get(predicted_etf, "#333")
+    # Respect ALL_NEGATIVE cash rule for next allocation display
+    all_negative  = all(v < 0 for v in exp_returns.values()) if exp_returns else False
+    predicted_etf = "CASH" if all_negative else (
+        max(exp_returns, key=exp_returns.get) if exp_returns else "N/A"
+    )
+    next_date  = get_hero_next_date()
+    etf_color  = ETF_COLORS.get(predicted_etf, "#333")
 
     st.markdown(
         f"<div style='padding:16px;border-radius:10px;"
@@ -260,9 +260,9 @@ with col_exp:
         exp_df = (pd.DataFrame.from_dict(exp_returns, orient="index", columns=["er"])
                   .sort_values("er", ascending=True))
         fig_bar = go.Figure(go.Bar(
-            x=exp_df["er"] * 100, y=exp_df.index, orientation="h",
+            x=exp_df["er"], y=exp_df.index, orientation="h",
             marker_color=[ETF_COLORS.get(e, "#888") for e in exp_df.index],
-            text=[f"{v*100:.4f}%" for v in exp_df["er"]], textposition="outside",
+            text=[f"{v:.4f}%" for v in exp_df["er"]], textposition="outside",
         ))
         fig_bar.update_layout(xaxis_title="Expected MA Diff / Price (%)",
                                height=260, margin=dict(l=0, r=80, t=10, b=30),
@@ -280,17 +280,16 @@ dd_date_str = str(pd.Timestamp(dd_date).date()) if dd_date is not None else "N/A
 dd_peak_str = str(pd.Timestamp(dd_peak).date()) if dd_peak is not None else "N/A"
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Ann. Return",   f"{metrics.get('ann_return', 0)*100:.2f}%")
-m2.metric("Sharpe Ratio",  f"{metrics.get('sharpe', 0):.3f}")
-m3.metric("Max Drawdown",  f"{dd_val*100:.2f}%",
+m1.metric("Ann. Return",  f"{metrics.get('ann_return', 0)*100:.2f}%")
+m2.metric("Sharpe Ratio", f"{metrics.get('sharpe', 0):.3f}")
+m3.metric("Max Drawdown", f"{dd_val*100:.2f}%",
           delta=f"peak {dd_peak_str} → trough {dd_date_str}", delta_color="off")
-m4.metric("Calmar Ratio",  f"{metrics.get('calmar', 0):.2f}")
+m4.metric("Calmar Ratio", f"{metrics.get('calmar', 0):.2f}")
 
-# Second row — detail metrics
 d1, d2, d3, d4 = st.columns(4)
-d1.metric("Win Rate",      f"{metrics.get('win_rate', 0)*100:.1f}%")
-d2.metric("Volatility",    f"{metrics.get('volatility', 0)*100:.2f}%")
-d3.metric("Sortino",       f"{metrics.get('sortino', 0):.3f}")
+d1.metric("Win Rate",    f"{metrics.get('win_rate', 0)*100:.1f}%")
+d2.metric("Volatility",  f"{metrics.get('volatility', 0)*100:.2f}%")
+d3.metric("Sortino",     f"{metrics.get('sortino', 0):.3f}")
 hit = metrics.get("hit_ratio", None)
 d4.metric("Hit Ratio (15d)", f"{hit*100:.1f}%" if hit is not None else "N/A")
 
@@ -344,9 +343,22 @@ if not audit.empty and oos_start:
                           hide_index=True, height=260)
 
 # ── AUDIT TABLE ───────────────────────────────────────────────────────────────
-NEW = """    # Format audit trail for clean display
+st.markdown("---")
+st.subheader("🗒️ OOS Trade Log  (last 20 entries)")
+
+if not audit.empty and oos_start:
+    audit_oos = audit.loc[audit.index >= oos_start].copy()
+
+    # Strip timestamp — date only
+    audit_oos.index = pd.to_datetime(audit_oos.index).normalize().date
+
+    # Format columns for clean display
     disp = audit_oos.tail(20).copy()
 
+    if "actual_return" in disp.columns:
+        disp["return_%"] = disp["actual_return"].apply(
+            lambda x: f"{x*100:.4f}%" if pd.notna(x) else "—"
+        )
     if "expected_return" in disp.columns:
         disp["exp_ret_%"] = disp["expected_return"].apply(
             lambda x: f"{x:.4f}%" if pd.notna(x) and x != 0 else "—"
@@ -356,22 +368,22 @@ NEW = """    # Format audit trail for clean display
             lambda x: f"{x:.2f}" if pd.notna(x) else "—"
         )
     if "switch_reason" in disp.columns:
-        disp["reason"] = disp["switch_reason"].replace("", "—")
+        disp["reason"] = disp["switch_reason"].apply(
+            lambda x: x if x and x != "" else "—"
+        )
     if "switch_flag" in disp.columns:
         disp["switch"] = disp["switch_flag"].apply(lambda x: "✅" if x else "")
     if "in_cash" in disp.columns:
         disp["cash"] = disp["in_cash"].apply(lambda x: "CASH" if x else "")
-    if "actual_return" in disp.columns:
-        disp["return_%"] = disp["actual_return"].apply(
-            lambda x: f"{x*100:.4f}%" if pd.notna(x) else "—"
-        )
 
     display_cols = [c for c in
                     ["selected_etf", "return_%", "exp_ret_%",
                      "z_score", "switch", "reason", "cash"]
                     if c in disp.columns]
 
-    st.dataframe(disp[display_cols], use_container_width=True, height=400)"""
+    st.dataframe(disp[display_cols], use_container_width=True, height=400)
+else:
+    st.info("No trade data available.")
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("---")
