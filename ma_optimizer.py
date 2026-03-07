@@ -21,6 +21,7 @@ from metrics import calculate_metrics
 
 MA_WINDOWS = [3, 5, 7]   # was [3, 5]; now reduced to three windows for faster training
 
+
 def optimize_ma_window(
     etf_list,
     data_dict,
@@ -62,7 +63,6 @@ def optimize_ma_window(
             continue
 
         common_idx    = pd.DatetimeIndex(sorted(common_idx))
-        n             = len(common_idx)
         train_dates   = common_idx[:train_end]
         val_dates     = common_idx[train_end:val_end]
         oos_dates     = common_idx[val_end:]
@@ -86,27 +86,31 @@ def optimize_ma_window(
         model.save(model_path)
         print(f"  Saved → {model_path}")
 
-        # ── VAL predictions (full transfer voting) ────────────────────────────
+        # ── Prediction helper (two-pass transfer voting) ──────────────────────
         def _predict_window(dates_window):
             X_window = {
                 etf: features_dict[etf].loc[
                     features_dict[etf].index.intersection(dates_window)]
                 for etf in etf_list if etf in features_dict
             }
-            # First pass: simple predictions for all ETFs
+
+            # Pass 1: simple voting predictions for every ETF
+            # These become the source_feature_dict for Pass 2
             simple = {}
             for etf in etf_list:
                 if etf in X_window and X_window[etf].shape[0] > 0:
-                    preds = model.predict_single_etf(X_window[etf], etf)
-                    simple[etf] = preds
+                    simple[etf] = X_window[etf]   # pass features, not preds
 
-            # Second pass: transfer voting with source predictions
+            # Pass 2: full transfer voting — each ETF uses other ETFs' models
+            # FIX: keyword was 'source_predictions' but the method parameter
+            # is named 'source_feature_dict' in TransferVotingModel.
             preds_dict = {}
             for etf in etf_list:
                 if etf in X_window and X_window[etf].shape[0] > 0:
                     tv_preds = model.predict_single_etf(
-                        X_window[etf], etf,
-                        source_predictions=simple,
+                        X_window[etf],
+                        etf,
+                        source_feature_dict=simple,   # ← was source_predictions=simple
                     )
                     preds_dict[etf] = pd.Series(
                         tv_preds,
@@ -139,7 +143,7 @@ def optimize_ma_window(
         else:
             val_returns[ma_window] = -999.0
 
-        # ── OOS backtest (informational only — not used for selection) ─────────
+        # ── OOS backtest (informational only) ─────────────────────────────────
         oos_preds = _predict_window(oos_dates)
         if oos_preds:
             engine_oos = StrategyEngine(etf_list)
