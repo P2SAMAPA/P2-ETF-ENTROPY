@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from huggingface_hub import hf_hub_download, list_repo_files
-import pytz
+
 
 from data_loader import load_dataset, load_metadata
 from update_data import main as incremental_update
@@ -74,9 +74,9 @@ def check_model_available(start_year: int) -> bool:
         return False
 
 
-def _today_est() -> str:
-    """Return today's date string in US/Eastern timezone."""
-    return datetime.datetime.now(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d")
+def _today_utc() -> str:
+    """Return today's date string in UTC — matches GitHub Actions run_date."""
+    return datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -276,14 +276,14 @@ z_threshold = st.sidebar.slider("Z-Score Re-entry",      0.50, 2.00, 0.70, step=
 
 trained_years = list_trained_years()
 year_run_dates = _year_run_dates()
-today_est      = _today_est()
+today_utc      = _today_utc()
 
 st.sidebar.markdown("---")
 st.sidebar.header("📅 Year Model Status")
 if trained_years:
     for yr in trained_years:
         rd = year_run_dates.get(yr, "unknown")
-        tag = "✅ today" if rd == today_est else f"🔄 {rd}"
+        tag = "✅ today" if rd == today_utc else f"🔄 {rd}"
         st.sidebar.caption(f"{yr}: {tag}")
 else:
     st.sidebar.warning("No trained years yet.")
@@ -291,7 +291,7 @@ else:
 # Years available to train:
 # - never trained, OR trained on a previous day (stale → eligible for refresh)
 years_trained_today = [yr for yr in trained_years
-                       if year_run_dates.get(yr) == today_est]
+                       if year_run_dates.get(yr) == today_utc]
 years_needing_train = [yr for yr in ALL_YEARS
                        if yr not in years_trained_today]
 
@@ -440,9 +440,8 @@ with tab1:
                 exp_returns[etf] = pred / price * 100.0 if price > 0 else 0.0
             except Exception:
                 exp_returns[etf] = 0.0
-        all_negative  = all(v < 0 for v in exp_returns.values()) if exp_returns else False
-        predicted_etf = "CASH" if all_negative else (
-            max(exp_returns, key=exp_returns.get) if exp_returns else "N/A")
+        predicted_etf = (max(exp_returns, key=exp_returns.get)
+                         if exp_returns else "N/A")
         next_date  = get_hero_next_date()
         etf_color  = ETF_COLORS.get(predicted_etf, "#333")
         st.markdown(
@@ -622,9 +621,7 @@ with tab2:
                     er[etf] = pred / price * 100.0 if price > 0 else 0.0
                 except Exception:
                     er[etf] = 0.0
-            all_neg   = all(v < 0 for v in er.values()) if er else False
-            next_pick = "CASH" if all_neg else (
-                max(er, key=er.get) if er else "N/A")
+            next_pick = max(er, key=er.get) if er else "N/A"
 
             oos_lbl = (f"{oos_s.date()} → {oos_e.date()}"
                        if oos_s and oos_e else "N/A")
