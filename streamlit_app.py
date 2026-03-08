@@ -30,7 +30,7 @@ st.set_page_config(page_title="ETF Transfer Voting Engine", page_icon="📈", la
 
 HF_REPO     = "P2SAMAPA/etf-entropy-dataset"
 GITHUB_REPO = "P2SAMAPA/P2-ETF-ENTROPY"
-ALL_YEARS   = list(range(2008, 2024))
+ALL_YEARS   = list(range(2008, 2023))
 ETF_COLORS  = {
     "TLT": "#1f77b4", "VNQ": "#ff7f0e", "GLD": "#ffd700",
     "SLV": "#aec7e8", "VCIT": "#2ca02c", "HYG": "#d62728",
@@ -187,9 +187,14 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
 
     # Run backtest on OOS dates only — prevents engine CASH state from
     # carrying over from val period and locking out z-score re-entry.
-    if oos_start and oos_end:
+    # IMPORTANT: upper bound uses the latest data available, NOT the
+    # training-time oos_end. oos_end is fixed at training date and would
+    # silently cut off any new trading days added since the last retrain.
+    data_end = df_raw.index.max()
+    if oos_start:
         oos_dates = [d for d in common_dates
-                     if pd.Timestamp(d) >= oos_start and pd.Timestamp(d) <= oos_end]
+                     if pd.Timestamp(d) >= oos_start
+                     and pd.Timestamp(d) <= data_end]
     else:
         oos_dates = common_dates
 
