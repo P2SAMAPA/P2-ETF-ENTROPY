@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from huggingface_hub import hf_hub_download, list_repo_files
+import pytz
 
 from data_loader import load_dataset, load_metadata
 from update_data import main as incremental_update
@@ -73,8 +74,23 @@ def check_model_available(start_year: int) -> bool:
         return False
 
 
+def _today_est() -> str:
+    """Return today's date string in US/Eastern timezone."""
+    return datetime.datetime.now(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d")
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def list_trained_years() -> list:
+    """Return sorted list of years that have a trained model in HF."""
+    return sorted(_year_run_dates().keys())
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _year_run_dates() -> dict:
+    """
+    Return {year: run_date_str} for all trained years.
+    Fetches best_model.json for each year to get the run_date field.
+    """
     try:
         files = list(list_repo_files(repo_id=HF_REPO, repo_type="dataset"))
         years = set()
@@ -87,9 +103,27 @@ def list_trained_years() -> list:
                     years.add(int(parts[1].replace("year_", "")))
                 except ValueError:
                     pass
-        return sorted(years)
     except Exception:
-        return []
+        return {}
+
+    run_dates = {}
+    for yr in sorted(years):
+        try:
+            local_dir = f"artifacts/year_{yr}"
+            os.makedirs(local_dir, exist_ok=True)
+            meta_path = hf_hub_download(
+                repo_id=HF_REPO,
+                filename=f"models/year_{yr}/best_model.json",
+                repo_type="dataset",
+                local_dir=local_dir,
+                force_download=True,
+            )
+            with open(meta_path) as f:
+                meta = json.load(f)
+            run_dates[yr] = meta.get("run_date", "unknown")
+        except Exception:
+            run_dates[yr] = "unknown"
+    return run_dates
 
 
 @st.cache_resource(show_spinner="Loading model...")
@@ -234,24 +268,40 @@ tx_cost     = st.sidebar.slider("Transaction Cost (bps)",  10,  25,  12)
 z_threshold = st.sidebar.slider("Z-Score Re-entry",      0.50, 2.00, 0.70, step=0.05)
 
 trained_years = list_trained_years()
+year_run_dates = _year_run_dates()
+today_est      = _today_est()
+
 st.sidebar.markdown("---")
 st.sidebar.header("📅 Year Model Status")
 if trained_years:
-    st.sidebar.success(f"✅ Trained: {', '.join(str(y) for y in trained_years)}")
-    untrained = [y for y in ALL_YEARS if y not in trained_years]
-    if untrained:
-        st.sidebar.caption(f"Not yet: {', '.join(str(y) for y in untrained)}")
+    for yr in trained_years:
+        rd = year_run_dates.get(yr, "unknown")
+        tag = "✅ today" if rd == today_est else f"🔄 {rd}"
+        st.sidebar.caption(f"{yr}: {tag}")
 else:
     st.sidebar.warning("No trained years yet.")
 
+# Years available to train:
+# - never trained, OR trained on a previous day (stale → eligible for refresh)
+years_trained_today = [yr for yr in trained_years
+                       if year_run_dates.get(yr) == today_est]
+years_needing_train = [yr for yr in ALL_YEARS
+                       if yr not in years_trained_today]
+
 st.sidebar.markdown("---")
-st.sidebar.header("🚀 Train New Years")
-st.sidebar.caption("Select 1–5 years — all train in parallel (~25 mins).")
-untrained_all = [y for y in ALL_YEARS if y not in trained_years]
+st.sidebar.header("🚀 Train / Refresh Years")
+st.sidebar.caption(
+    "Untrained years and yesterday's models are available. "
+    "Select 1–5 — all train in parallel (~30 mins)."
+)
 years_to_train = st.sidebar.multiselect(
     "Select years to train",
-    options=untrained_all,
+    options=years_needing_train,
     max_selections=5,
+    format_func=lambda y: (
+        f"{y}  🔄 retrain (last: {year_run_dates.get(y, '?')})"
+        if y in trained_years else f"{y}  ⬜ new"
+    ),
     placeholder="Choose up to 5 years...",
 )
 if st.sidebar.button("🚀 Trigger Training", type="primary",
