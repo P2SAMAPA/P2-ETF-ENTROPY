@@ -13,6 +13,11 @@ import time
 import json
 import glob
 import datetime
+try:
+    import pytz
+    _EST = pytz.timezone('US/Eastern')
+except ImportError:
+    _EST = None
 import numpy as np
 import pandas as pd
 from huggingface_hub import HfApi, CommitOperationAdd, CommitOperationDelete, list_repo_files
@@ -144,7 +149,10 @@ def main():
     except ValueError:
         raise RuntimeError(f"Invalid TRAINING_START_YEAR: '{start_year_str}'")
 
-    run_date = datetime.date.today().isoformat()
+    if _EST:
+        run_date = datetime.datetime.now(_EST).strftime('%Y-%m-%d')
+    else:
+        run_date = datetime.date.today().isoformat()
     print(f"Starting retraining — start_year={start_year}, run_date={run_date}")
 
     token = os.getenv("HF_TOKEN")
