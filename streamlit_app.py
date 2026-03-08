@@ -24,7 +24,7 @@ from strategy_engine import StrategyEngine
 from transfer_voting import TransferVotingModel
 from backtest import run_backtest
 from metrics import calculate_metrics
-from utils import get_hero_next_date, get_oos_index
+from utils import get_hero_next_date
 
 st.set_page_config(page_title="ETF Transfer Voting Engine", page_icon="📈", layout="wide")
 
@@ -190,23 +190,30 @@ def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_thre
     price_aligned = price_df.loc[price_df.index.isin(common_dates)]
     tbill_aligned = tbill_series.loc[tbill_series.index.isin(common_dates)]
 
+    # Run backtest on OOS dates only — prevents engine CASH state from
+    # carrying over from val period and locking out z-score re-entry.
+    if oos_start and oos_end:
+        oos_dates = [d for d in common_dates
+                     if pd.Timestamp(d) >= oos_start and pd.Timestamp(d) <= oos_end]
+    else:
+        oos_dates = common_dates
+
     engine  = StrategyEngine(TARGET_ETFS, tsl_pct=tsl_pct,
                               transaction_cost_bps=tx_cost, z_score_threshold=z_threshold)
-    results = run_backtest(predictions, price_aligned, tbill_aligned, engine, common_dates)
+    results = run_backtest(predictions, price_aligned, tbill_aligned, engine, oos_dates)
     timings["Backtest"] = round(time.time() - t, 1)
 
-    equity = results["equity_curve"]
-    if oos_start and oos_end:
-        equity_oos, returns_oos, rf_oos = get_oos_index(
-            equity, results["returns"], results["risk_free"], oos_start, oos_end)
-    else:
-        equity_oos, returns_oos, rf_oos = equity, results["returns"], results["risk_free"]
+    equity     = results["equity_curve"]
+    equity_oos = equity
+    returns_oos = results["returns"]
+    rf_oos      = results["risk_free"]
 
-    if equity_oos.empty:
+    if equity_oos is None or (hasattr(equity_oos, 'empty') and equity_oos.empty):
         return None, None, None, timings, oos_start, oos_end, data_dict, predictions
 
     equity_series = (equity_oos["strategy"]
-                     if isinstance(equity_oos, pd.DataFrame) else equity_oos)
+                     if isinstance(equity_oos, pd.DataFrame)
+                     and "strategy" in equity_oos.columns else equity_oos)
 
     raw_metrics = calculate_metrics(equity_series, returns_oos, rf_oos, results["audit_trail"])
 
