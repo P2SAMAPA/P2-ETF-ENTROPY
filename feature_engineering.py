@@ -146,9 +146,12 @@ def prepare_all_features(df, ma_window=5, year_start=2008):
         X_full = features_df[etf_cols]
         y_full = create_target(df_aligned, etf, ma_window)
 
-        common_idx = X_full.index.intersection(y_full.dropna().index)
-        X_full     = X_full.loc[common_idx]
-        y_full     = y_full.loc[common_idx]
+        # Keep X_full on full features index — do NOT drop the last row just
+        # because its forward target is NaN. The last row is the live signal
+        # date (today's close → tomorrow's allocation). It has no forward
+        # return yet, so y is NaN for it, but we still need it in X for
+        # prediction. Drop NaN only from y; X keeps all rows.
+        y_full     = y_full.loc[X_full.index.intersection(y_full.dropna().index)]
 
         if len(X_full) < 50:
             continue
@@ -224,7 +227,12 @@ def get_oos_dates(data_dict):
     sd        = data_dict["split_dates"][ref]
     oos_start = pd.Timestamp(sd["oos_start"]) if sd.get("oos_start") else None
 
-    if ref in data_dict.get("features_test", {}):
+    # Read oos_end from the full features index — this includes the last
+    # live trading day even when its forward target is NaN (no tomorrow yet).
+    # features_test stops at val_end and may exclude the current live row.
+    if ref in data_dict.get("features", {}):
+        oos_end = data_dict["features"][ref].index[-1]
+    elif ref in data_dict.get("features_test", {}):
         oos_end = data_dict["features_test"][ref].index[-1]
     else:
         oos_end = pd.Timestamp(sd["oos_end"]) if sd.get("oos_end") else None
