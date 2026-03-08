@@ -85,7 +85,7 @@ def list_trained_years() -> list:
     return sorted(_year_run_dates().keys())
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def _year_run_dates() -> dict:
     """
     Return {year: run_date_str} for all trained years.
@@ -111,13 +111,19 @@ def _year_run_dates() -> dict:
         try:
             local_dir = f"artifacts/year_{yr}"
             os.makedirs(local_dir, exist_ok=True)
+            # Use cache_bust param to force fresh fetch each time this
+            # cached function is called (TTL=60s handles the rest)
             meta_path = hf_hub_download(
                 repo_id=HF_REPO,
                 filename=f"models/year_{yr}/best_model.json",
                 repo_type="dataset",
                 local_dir=local_dir,
-                force_download=True,
             )
+            # Remove cached file so next call always gets fresh version
+            try:
+                os.remove(meta_path)
+            except Exception:
+                pass
             with open(meta_path) as f:
                 meta = json.load(f)
             run_dates[yr] = meta.get("run_date", "unknown")
