@@ -6,11 +6,10 @@ Eq.(21):  w_i = 1 / d_i            (source weight = inverse DTW distance)
 Eq.(22):  ŷ = Σ(w_i × M_i) / Σw_i (weighted average of SOURCE models only)
 
 Key fix vs previous version:
-  - Each source model now predicts on the TARGET ETF's features, not its own.
-    This is the actual knowledge transfer — "what does TLT's model say about
-    GLD's momentum patterns?" Previously every source was predicting its own
-    MA diff, causing high-MA-diff ETFs (TLT) to dominate every vote regardless
-    of the target's actual signal.
+  - Each source model predicts on TARGET ETF's features (knowledge transfer).
+  - Feature column names are renamed to match the source ETF's expected prefix
+    before prediction, so sklearn does not reject the input.
+    e.g. TLT_MA3 → VNQ_MA3 when asking VNQ's model to interpret TLT's features.
 """
 
 import numpy as np
@@ -23,18 +22,6 @@ from dtw_weights import compute_dtw_matrix
 
 
 class TransferVotingModel:
-    """
-    Transfer Voting Ensemble following the Entropy paper.
-
-    Training flow
-    -------------
-    1. Compute DTW weight matrix on TRAINING prices only.
-    2. For each ETF, train a base-model ensemble on that ETF's training data.
-    3. At prediction time, for target ETF t:
-         a. Run each SOURCE ETF's model on TARGET t's features (KEY FIX).
-         b. Weight those predictions by DTW similarity to t (Eq. 22).
-         c. Return weighted average — target ETF itself is excluded.
-    """
 
     def __init__(self, etf_list: list, ma_window: int, artifact_path: str = "artifacts"):
         self.etf_list      = etf_list
@@ -43,6 +30,8 @@ class TransferVotingModel:
         self.dtw_weights   = None
         self.base_models   = {}
         self.is_fitted     = False
+
+    # ── Fitting ───────────────────────────────────────────────────────
 
     def fit(self, X_train_dict, y_train_dict, train_price_df):
         os.makedirs(self.artifact_path, exist_ok=True)
@@ -86,23 +75,47 @@ class TransferVotingModel:
         print(f"\nTransferVotingModel fitted — MA{self.ma_window}, "
               f"{len(self.base_models)} ETFs")
 
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _rename_for_source(X: pd.DataFrame, source_etf: str) -> pd.DataFrame:
+        """
+        Rename TARGET ETF feature columns to SOURCE ETF prefix so sklearn
+        accepts them. e.g. TLT_MA3 → VNQ_MA3 when source_etf=VNQ.
+        All ETFs share identical feature structure — only the prefix differs.
+        """
+        if X.empty or len(X.columns) == 0:
+            return X
+        first_col     = X.columns[0]
+        parts         = first_col.split("_", 1)
+        if len(parts) < 2:
+            return X
+        target_prefix = parts[0]
+        if target_prefix == source_etf:
+            return X  # already correct
+        rename_map = {
+            col: col.replace(f"{target_prefix}_", f"{source_etf}_", 1)
+            for col in X.columns
+            if col.startswith(f"{target_prefix}_")
+        }
+        return X.rename(columns=rename_map)
+
     def _simple_voting_pred(self, etf: str, X: pd.DataFrame) -> np.ndarray:
-        """Mean of all base-model predictions for a single ETF."""
+        """Mean of all base-model predictions. X must have correct prefix for etf."""
         if etf not in self.base_models:
             return np.zeros(len(X))
         preds = predict_base_models(self.base_models[etf], X)
         return np.mean(list(preds.values()), axis=0)
 
+    # ── Prediction ────────────────────────────────────────────────────
+
     def predict_single_etf(self, X, target_etf, source_feature_dict=None):
         """
         Predict for one target ETF using Transfer Voting (Eq. 22).
 
-        KEY FIX: each source ETF's model predicts on TARGET's features X,
-        not on the source's own features. This is the actual knowledge
-        transfer — source models interpret target momentum patterns.
-
-        source_feature_dict is kept as a parameter for API compatibility
-        but is no longer used for predictions (only for availability check).
+        Each source ETF's model predicts on TARGET's features (renamed to
+        match source's expected column prefix). This is the actual knowledge
+        transfer — source models interpret the target's momentum patterns.
         """
         if target_etf not in self.base_models:
             raise ValueError(f"No model for {target_etf}")
@@ -123,9 +136,10 @@ class TransferVotingModel:
             if w <= 0:
                 continue
 
-            # KEY FIX: source model applied to TARGET's features X
-            # (was: source_feature_dict[source_etf] — source's own features)
-            source_pred   = self._simple_voting_pred(source_etf, X)
+            # Rename target's feature columns to source's expected prefix
+            X_renamed   = self._rename_for_source(X, source_etf)
+            source_pred = self._simple_voting_pred(source_etf, X_renamed)
+
             weighted_sum += w * source_pred
             weight_total += w
 
@@ -143,6 +157,8 @@ class TransferVotingModel:
                 predictions[etf] = self.predict_single_etf(
                     X_dict[etf], etf, source_feature_dict=X_dict)
         return predictions
+
+    # ── Persistence ───────────────────────────────────────────────────
 
     def save(self, filename):
         joblib.dump({
