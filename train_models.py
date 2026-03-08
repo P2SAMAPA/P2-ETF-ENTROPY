@@ -44,14 +44,26 @@ def already_trained_today(token: str, start_year: int) -> bool:
     return False
 
 
-def delete_old_stamped_files(api, token: str, start_year: int, run_date: str):
+def delete_old_stamped_files(api, token: str, start_year: int, run_date: str,
+                              current_files: list):
     """
-    Delete date-stamped files from models/year_XXXX/ that are NOT from today.
-    Keeps: un-stamped latest pointers + today's stamped copy.
-    Deletes: any *_YYYY-MM-DD.* where date != run_date.
+    Delete ALL date-stamped files from models/year_XXXX/ EXCEPT those that
+    match both today's run_date AND are in the current upload set.
+
+    This handles two cases:
+    1. Old date stamps (previous days) — always deleted.
+    2. Same date but obsolete MA windows (e.g. MA3/MA5 after adding MA10)
+       — deleted because they're not in current_files list.
+
+    current_files: list of bare filenames (no path) uploaded in this run.
     """
-    hf_folder    = f"models/year_{start_year}"
-    date_pattern = re.compile(r'_(\d{4}-\d{2}-\d{2})\.')
+    hf_folder      = f"models/year_{start_year}"
+    date_pattern   = re.compile(r'_(\d{4}-\d{2}-\d{2})\.')
+    current_stamped = set()
+    for fname in current_files:
+        name, ext = os.path.splitext(fname)
+        current_stamped.add(f"{name}_{run_date}{ext}")
+
     try:
         all_files = list(list_repo_files(
             repo_id=HF_DATASET_REPO, repo_type="dataset", token=token))
@@ -63,21 +75,25 @@ def delete_old_stamped_files(api, token: str, start_year: int, run_date: str):
     for f in all_files:
         if not f.startswith(hf_folder + "/"):
             continue
-        m = date_pattern.search(f)
-        if m and m.group(1) != run_date:
+        basename = f.split("/")[-1]
+        m = date_pattern.search(basename)
+        if not m:
+            continue  # un-stamped latest pointer — keep
+        # Delete if: wrong date OR not in current upload set
+        if m.group(1) != run_date or basename not in current_stamped:
             to_delete.append(f)
 
     if not to_delete:
         print("  🧹 No old stamped files to clean up.")
         return
 
-    print(f"  🧹 Deleting {len(to_delete)} old stamped files from {hf_folder}...")
+    print(f"  🧹 Deleting {len(to_delete)} obsolete stamped files from {hf_folder}...")
     try:
         api.create_commit(
             repo_id=HF_DATASET_REPO,
             repo_type="dataset",
             token=token,
-            commit_message=f"Cleanup old artifacts year_{start_year} (keeping {run_date})",
+            commit_message=f"Cleanup obsolete artifacts year_{start_year} (keeping {run_date})",
             operations=[CommitOperationDelete(path_in_repo=f) for f in to_delete],
         )
         for f in to_delete:
@@ -136,8 +152,9 @@ def upload_artifacts_to_hf(artifact_path: str, token: str,
     )
     print(f"  ✅ Uploaded {len(operations)} files to {HF_DATASET_REPO}/{hf_folder}")
 
-    # Clean up old stamped files — keep only today's
-    delete_old_stamped_files(api, token, start_year, run_date)
+    # Clean up obsolete stamped files — wrong date OR obsolete MA windows
+    current_filenames = [os.path.basename(f) for f in files]
+    delete_old_stamped_files(api, token, start_year, run_date, current_filenames)
 
 
 def main():
