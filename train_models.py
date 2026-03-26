@@ -2,9 +2,10 @@
 """
 Training script for GitHub Actions.
 Reads TRAINING_START_YEAR env var (set by train.yml).
-Saves artifacts to models/year_XXXX/ in HF dataset, stamped with run date.
+Saves artifacts to models/option_<a|b>/year_XXXX/ in HF dataset, stamped with run date.
 Skips upload if a model for this year was already run today.
 Cleans up old date-stamped files after upload — keeps only latest per year.
+Supports both Option A (FI/Commodities) and Option B (Equity) via --option argument.
 """
 import os
 import sys
@@ -13,6 +14,7 @@ import time
 import json
 import glob
 import datetime
+import argparse
 try:
     import pytz
     _EST = pytz.timezone('US/Eastern')
@@ -25,39 +27,37 @@ from data_loader import load_dataset
 from feature_engineering import prepare_all_features
 from ma_optimizer import optimize_ma_window, MA_WINDOWS
 
+# Import config for ETF lists
+from config import OPTION_A_ETFS, OPTION_B_ETFS
+
 HF_DATASET_REPO = "P2SAMAPA/etf-entropy-dataset"
 
 
-def already_trained_today(token: str, start_year: int) -> bool:
-    """Check if a model for this year was already uploaded today."""
+def already_trained_today(token: str, option: str, start_year: int) -> bool:
+    """Check if a model for this option and year was already uploaded today."""
     today     = datetime.date.today().isoformat()
-    hf_prefix = f"models/year_{start_year}/"
+    hf_prefix = f"models/option_{option}/year_{start_year}/"
     try:
         files = list(list_repo_files(
             repo_id=HF_DATASET_REPO, repo_type="dataset", token=token))
         for f in files:
             if f.startswith(hf_prefix) and today in f:
-                print(f"  ⏭️  Model for year {start_year} already trained today ({today}). Skipping.")
+                print(f"  ⏭️  Model for option {option.upper()}, year {start_year} already trained today ({today}). Skipping.")
                 return True
     except Exception as e:
         print(f"  ⚠️  Could not check existing runs: {e}")
     return False
 
 
-def delete_old_stamped_files(api, token: str, start_year: int, run_date: str,
-                              current_files: list):
+def delete_old_stamped_files(api, token: str, option: str, start_year: int,
+                              run_date: str, current_files: list):
     """
-    Delete ALL date-stamped files from models/year_XXXX/ EXCEPT those that
+    Delete ALL date-stamped files from models/option_{option}/year_{start_year}/ EXCEPT those that
     match both today's run_date AND are in the current upload set.
-
-    This handles two cases:
-    1. Old date stamps (previous days) — always deleted.
-    2. Same date but obsolete MA windows (e.g. MA3/MA5 after adding MA10)
-       — deleted because they're not in current_files list.
 
     current_files: list of bare filenames (no path) uploaded in this run.
     """
-    hf_folder      = f"models/year_{start_year}"
+    hf_folder      = f"models/option_{option}/year_{start_year}"
     date_pattern   = re.compile(r'_(\d{4}-\d{2}-\d{2})\.')
     current_stamped = set()
     for fname in current_files:
@@ -93,7 +93,7 @@ def delete_old_stamped_files(api, token: str, start_year: int, run_date: str,
             repo_id=HF_DATASET_REPO,
             repo_type="dataset",
             token=token,
-            commit_message=f"Cleanup obsolete artifacts year_{start_year} (keeping {run_date})",
+            commit_message=f"Cleanup obsolete artifacts option_{option} year_{start_year} (keeping {run_date})",
             operations=[CommitOperationDelete(path_in_repo=f) for f in to_delete],
         )
         for f in to_delete:
@@ -104,8 +104,8 @@ def delete_old_stamped_files(api, token: str, start_year: int, run_date: str,
 
 
 def upload_artifacts_to_hf(artifact_path: str, token: str,
-                            start_year: int, run_date: str):
-    """Upload all artifact files to HuggingFace under models/year_XXXX/."""
+                            option: str, start_year: int, run_date: str):
+    """Upload all artifact files to HuggingFace under models/option_{option}/year_{start_year}/."""
     print("\n📤 Uploading artifacts to HuggingFace...")
     api = HfApi(token=token)
 
@@ -122,7 +122,7 @@ def upload_artifacts_to_hf(artifact_path: str, token: str,
         print("  ⚠️ No artifact files found to upload.")
         return
 
-    hf_folder  = f"models/year_{start_year}"
+    hf_folder  = f"models/option_{option}/year_{start_year}"
     operations = []
 
     for local_path in files:
@@ -147,17 +147,23 @@ def upload_artifacts_to_hf(artifact_path: str, token: str,
         repo_id=HF_DATASET_REPO,
         repo_type="dataset",
         token=token,
-        commit_message=f"Model year_{start_year} update [{run_date}]",
+        commit_message=f"Model option_{option} year_{start_year} update [{run_date}]",
         operations=operations,
     )
     print(f"  ✅ Uploaded {len(operations)} files to {HF_DATASET_REPO}/{hf_folder}")
 
     # Clean up obsolete stamped files — wrong date OR obsolete MA windows
     current_filenames = [os.path.basename(f) for f in files]
-    delete_old_stamped_files(api, token, start_year, run_date, current_filenames)
+    delete_old_stamped_files(api, token, option, start_year, run_date, current_filenames)
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Train entropy model for a given option")
+    parser.add_argument("--option", choices=["a", "b"], default="a",
+                        help="Option to train: a (FI/Commodities) or b (Equity)")
+    args = parser.parse_args()
+    option = args.option.lower()
+
     t0 = time.time()
 
     start_year_str = os.getenv("TRAINING_START_YEAR", "2012")
@@ -170,19 +176,30 @@ def main():
         run_date = datetime.datetime.now(_EST).strftime('%Y-%m-%d')
     else:
         run_date = datetime.date.today().isoformat()
-    print(f"Starting retraining — start_year={start_year}, run_date={run_date}")
+    print(f"Starting retraining — option={option.upper()}, start_year={start_year}, run_date={run_date}")
 
     token = os.getenv("HF_TOKEN")
     if not token:
         raise RuntimeError("HF_TOKEN environment variable not set")
 
-    if already_trained_today(token, start_year):
+    if already_trained_today(token, option, start_year):
         sys.exit(0)
 
     df = load_dataset()
     print(f"Dataset shape: {df.shape}  ({df.index[0].date()} → {df.index[-1].date()})")
 
-    etf_list = ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD"]
+    # Select ETF list based on option
+    if option == "a":
+        etf_list = OPTION_A_ETFS
+        # The original list included VCIT which is not in OPTION_A_ETFS; we need to keep original behavior for Option A.
+        # The original script used: ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD"]
+        # But our config OPTION_A_ETFS does not have VCIT. We should either add VCIT to config or handle specially.
+        # Since the existing repo uses VCIT, we must keep it for Option A. We'll override for Option A to match original.
+        # For Option B, we use the exact list from config.
+        etf_list = ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD"]
+    else:
+        etf_list = OPTION_B_ETFS
+
     required = etf_list + ["3MTBILL"]
     missing  = [c for c in required if c not in df.columns]
     if missing:
@@ -195,7 +212,7 @@ def main():
     for ma in MA_WINDOWS:
         print(f"\nPreparing features MA({ma}) …")
         t = time.time()
-        data_dict[ma] = prepare_all_features(df, ma_window=ma, year_start=start_year)
+        data_dict[ma] = prepare_all_features(df, ma_window=ma, year_start=start_year, etf_list=etf_list)
         print(f"  MA({ma}) features ready in {round(time.time()-t,1)}s")
 
     best_ma, results = optimize_ma_window(
@@ -207,23 +224,41 @@ def main():
 
     total = round(time.time() - t0, 1)
     print(f"\n{'='*60}")
-    print(f"Training complete in {total}s  |  Best MA: MA({best_ma})  |  Year: {start_year}")
+    print(f"Training complete in {total}s  |  Best MA: MA({best_ma})  |  Year: {start_year} | Option: {option.upper()}")
     for w, r in sorted(results.items()):
         print(f"  MA({w}): val ann_return = {r*100:.2f}%")
     print("="*60)
 
-    # Enrich best_model.json with year and run date
-    best_model_path = "artifacts/best_model.json"
+    # Prepare artifacts directory for this option
+    artifact_dir = f"artifacts/option_{option}"
+    os.makedirs(artifact_dir, exist_ok=True)
+
+    # Enrich best_model.json with year, run date, and option
+    best_model_path = os.path.join(artifact_dir, "best_model.json")
     if os.path.exists(best_model_path):
         with open(best_model_path) as f:
             bm = json.load(f)
         bm["start_year"]   = start_year
         bm["run_date"]     = run_date
         bm["last_trained"] = run_date
+        bm["option"]       = option
+        with open(best_model_path, "w") as f:
+            json.dump(bm, f, indent=2)
+    else:
+        # No existing file; create a minimal one
+        bm = {
+            "start_year": start_year,
+            "run_date": run_date,
+            "last_trained": run_date,
+            "option": option,
+            "best_ma": best_ma,
+            "results": results,
+        }
         with open(best_model_path, "w") as f:
             json.dump(bm, f, indent=2)
 
-    upload_artifacts_to_hf("artifacts", token, start_year, run_date)
+    # Note: We need to upload all files from the option-specific artifact directory
+    upload_artifacts_to_hf(artifact_dir, token, option, start_year, run_date)
 
     print("\nTraining complete.")
 
