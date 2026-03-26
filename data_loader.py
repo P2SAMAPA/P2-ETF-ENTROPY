@@ -3,6 +3,8 @@ Data Loader Module — fixed
   - download_tbill_data: guard start_date > end_date → return empty frame
   - download_etf_data: same guard
   - Both accept explicit end_date (no silent today default causing stale end)
+  - Now fetches all ETFs (both Option A and Option B) for data pipeline.
+  - Option‑aware artifact loading added.
 """
 
 import os
@@ -16,8 +18,10 @@ from fredapi import Fred
 from huggingface_hub import HfApi, hf_hub_download
 
 from utils import get_latest_trading_day
+from config import ALL_TICKERS   # <-- new import
 
 HF_DATASET_REPO = "P2SAMAPA/etf-entropy-dataset"
+# Original ETF list is kept for backward compatibility (used only for Option A artifacts)
 ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD", "SPY", "AGG"]
 
 
@@ -35,8 +39,9 @@ def download_etf_data(start_date, end_date=None):
     end_exclusive = (datetime.strptime(end_date, "%Y-%m-%d") + _td(days=1)).strftime("%Y-%m-%d")
 
     print(f"Downloading ETF data from {start_date} to {end_date} (yf end={end_exclusive})...")
+    # Use ALL_TICKERS to fetch all 18 ETFs
     data = yf.download(
-        ETF_LIST, start=start_date, end=end_exclusive,
+        ALL_TICKERS, start=start_date, end=end_exclusive,
         auto_adjust=True, progress=False, threads=False
     )
 
@@ -148,7 +153,8 @@ def seed_dataset(end_date=None):
 
     df = etf.join(tbill, how="left").ffill().bfill()
 
-    for col in ETF_LIST + ["3MTBILL"]:
+    # Verify that all expected columns exist (original + new equity)
+    for col in ALL_TICKERS + ["3MTBILL"]:
         if col not in df.columns:
             print(f"Warning: {col} missing from dataset")
 
@@ -175,3 +181,75 @@ def seed_dataset(end_date=None):
 def get_last_update_date():
     meta = load_metadata()
     return pd.to_datetime(meta["last_data_update"]) if meta else None
+
+
+# =============================================================================
+# NEW: Option‑aware artifact loading/saving
+# =============================================================================
+
+def _option_artifact_path(option: str, filename: str) -> str:
+    """
+    Return the local path for an option‑specific artifact.
+    Option 'a' -> artifacts/option_a/<filename>
+    Option 'b' -> artifacts/option_b/<filename>
+    """
+    return os.path.join("artifacts", f"option_{option}", filename)
+
+
+def load_artifacts(option: str, filename: str):
+    """
+    Load an artifact (e.g., model weights, predictions, etc.) for a given option.
+    Tries HF first, then local fallback.
+    """
+    repo_path = _option_artifact_path(option, filename)
+    try:
+        path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename=repo_path,
+            repo_type="dataset",
+        )
+        # Determine if it's a parquet or a pickle/other based on extension
+        if filename.endswith(".parquet"):
+            df = pd.read_parquet(path)
+            print(f"Loaded {repo_path} from HF ({len(df)} rows)")
+            return df
+        else:
+            # For pickle or other binary files, return raw bytes (caller will interpret)
+            with open(path, "rb") as f:
+                return f.read()
+    except Exception as e:
+        print(f"Could not load {repo_path} from HF: {e}")
+        # Try local fallback
+        local_path = _option_artifact_path(option, filename)
+        if os.path.exists(local_path):
+            if filename.endswith(".parquet"):
+                df = pd.read_parquet(local_path)
+                print(f"Loaded {repo_path} from local fallback ({len(df)} rows)")
+                return df
+            else:
+                with open(local_path, "rb") as f:
+                    return f.read()
+        raise FileNotFoundError(f"Artifact {repo_path} not found.")
+
+
+def save_artifacts(option: str, filename: str, data) -> bool:
+    """
+    Save an artifact (DataFrame or bytes) for a given option to local disk and upload to HF.
+    """
+    local_dir = _option_artifact_path(option, "")
+    os.makedirs(local_dir, exist_ok=True)
+    local_path = _option_artifact_path(option, filename)
+    repo_path = _option_artifact_path(option, filename)
+
+    if isinstance(data, pd.DataFrame):
+        data.to_parquet(local_path)
+    else:
+        with open(local_path, "wb") as f:
+            f.write(data)
+
+    try:
+        save_to_hf(local_path, repo_path)
+        return True
+    except Exception as e:
+        print(f"Failed to upload {repo_path}: {e}")
+        return False
