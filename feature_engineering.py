@@ -1,17 +1,12 @@
 """
 Feature Engineering — SPEED OPTIMISED
-Changes vs previous:
-  - Removed cross-ETF relative price ratios (7×6=42 cols → 0) — biggest win
-  - Reduced MA windows from [3,5] to [5] only — halves MA feature count
-  - Reduced lags from 10 → 5 — halves lag feature count
-  - Fixed DataFrame fragmentation warning: build all columns in dict,
-    then create DataFrame once via pd.concat(axis=1)
-  - Result: ~288 features → ~80 features, ~4x fewer columns = much faster CV
+Now supports dynamic ETF lists for Option A and Option B.
 """
 
 import pandas as pd
 import numpy as np
 
+# Default ETF list for backward compatibility (Option A)
 TARGET_ETFS    = ["TLT", "VNQ", "GLD", "SLV", "VCIT", "HYG", "LQD"]
 BENCHMARK_ETFS = ["SPY", "AGG"]
 TRAIN_PCT = 0.80
@@ -45,18 +40,16 @@ def compute_atr(series, window=14):
     return series.diff().abs().rolling(window).mean()
 
 
-def add_technical_indicators(df, ma_window=5):
+def add_technical_indicators(df, ma_window=5, etf_list=None):
     """
-    Build feature matrix.
+    Build feature matrix for the given ETF list.
+    If etf_list is None, uses global TARGET_ETFS.
+    """
+    if etf_list is None:
+        etf_list = TARGET_ETFS
 
-    SPEED FIX 1: Removed cross-ETF relative ratios (was 42 cols, biggest cost).
-    SPEED FIX 2: Single MA window (ma_window only, not [3,5]).
-    SPEED FIX 3: Lags reduced from 10 → 5.
-    SPEED FIX 4: Build all columns in a dict first, then pd.DataFrame once
-                 — eliminates the DataFrame fragmentation PerformanceWarning.
-    """
-    cols     = {}
-    etf_cols = [c for c in df.columns if c in TARGET_ETFS]
+    cols = {}
+    etf_cols = [c for c in df.columns if c in etf_list]
 
     for col in etf_cols:
         price = df[col]
@@ -70,7 +63,7 @@ def add_technical_indicators(df, ma_window=5):
         cols[f"{col}_MA{ma_window}"]          = ma
         cols[f"{col}_MA{ma_window}_DIFF"]     = diff
 
-        # Lags 1→5 (was 1→10)
+        # Lags 1→5
         for lag in range(1, 6):
             cols[f"{col}_MA{ma_window}_DIFF_LAG{lag}"] = diff.shift(lag)
             cols[f"{col}_RET_LAG{lag}"]                = ret.shift(lag)
@@ -85,12 +78,10 @@ def add_technical_indicators(df, ma_window=5):
         cols[f"{col}_MACD_SIGNAL"] = macd_sig
         cols[f"{col}_ATR"]         = compute_atr(price)
 
-    # REMOVED: cross-ETF relative price ratios (7×6=42 cols, ~15% of fit time)
-
     if "3MTBILL" in df.columns:
         cols["TBILL"] = df["3MTBILL"]
 
-    # Build DataFrame once — no fragmentation
+    # Build DataFrame once
     return pd.DataFrame(cols, index=df.index)
 
 
@@ -116,16 +107,20 @@ def compute_split_indices(n):
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def prepare_all_features(df, ma_window=5, year_start=2008):
+def prepare_all_features(df, ma_window=5, year_start=2008, etf_list=None):
     """
     80/10/10 split, per-ETF indices, Z-score normalisation on train stats only.
+    If etf_list is None, uses global TARGET_ETFS.
     """
+    if etf_list is None:
+        etf_list = TARGET_ETFS
+
     df_filtered = df[df.index >= f"{year_start}-01-01"].copy()
 
     if len(df_filtered) < 100:
         return {"features": {}, "split_dates": {}, "features_test": {}}
 
-    features_df = add_technical_indicators(df_filtered, ma_window)
+    features_df = add_technical_indicators(df_filtered, ma_window, etf_list=etf_list)
     features_df = features_df.dropna()
     df_aligned  = df_filtered.loc[features_df.index]
 
@@ -134,7 +129,7 @@ def prepare_all_features(df, ma_window=5, year_start=2008):
     split_dates   = {}
     features_test = {}
 
-    for etf in TARGET_ETFS:
+    for etf in etf_list:
         if etf not in df_aligned.columns:
             continue
 
@@ -200,7 +195,8 @@ def prepare_all_features(df, ma_window=5, year_start=2008):
     if not features:
         return {"features": {}, "split_dates": {}, "features_test": {}}
 
-    ref           = TARGET_ETFS[0] if TARGET_ETFS[0] in features else next(iter(features))
+    # Use the first ETF in the list as reference for lengths (for backward compatibility)
+    ref           = etf_list[0] if etf_list[0] in features else next(iter(features))
     n_ref         = len(features[ref])
     train_end_ref, val_end_ref = compute_split_indices(n_ref)
 
@@ -214,13 +210,19 @@ def prepare_all_features(df, ma_window=5, year_start=2008):
     }
 
 
-def get_oos_dates(data_dict):
+def get_oos_dates(data_dict, etf_list=None):
+    """
+    Get OOS start and end dates. If etf_list is provided, use it; otherwise use global TARGET_ETFS.
+    """
     if not isinstance(data_dict, dict):
         return None, None
     if not data_dict.get("split_dates"):
         return None, None
 
-    ref = next((e for e in TARGET_ETFS if e in data_dict["split_dates"]), None)
+    if etf_list is None:
+        etf_list = TARGET_ETFS
+
+    ref = next((e for e in etf_list if e in data_dict["split_dates"]), None)
     if ref is None:
         return None, None
 
