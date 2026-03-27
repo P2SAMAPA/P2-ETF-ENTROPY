@@ -1,4 +1,5 @@
 name: ETF Entropy Pipeline
+
 on:
   schedule:
     # Daily data update: Mon-Fri at 8pm EST (1am UTC next day)
@@ -22,9 +23,10 @@ on:
         type: string
 
 jobs:
-  update-and-train:
+  # ── Daily incremental data update ──────────────────────────────
+  update-data:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,36 +39,93 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # ── Daily: incremental data update ──────────────────────────────
       - name: Daily Incremental Update
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python update_data.py
 
-      # ── Weekly or manual: full retraining ───────────────────────────
-      - name: Weekly Full Retraining
-        if: >
-          github.event.schedule == '0 4 * * 0' ||
-          github.event.inputs.run_training == 'true'
+      - name: Upload logs (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-logs
+          path: "*.log"
+          retention-days: 7
+
+  # ── Weekly or manual: full retraining Option A ─────────────────
+  train-a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    needs: update-data
+    if: >
+      github.event.schedule == '0 4 * * 0' ||
+      github.event.inputs.run_training == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train Option A
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2012' }}
         run: |
-          echo "Starting full retraining for year $TRAINING_START_YEAR..."
-          python train_models.py
+          echo "Starting retraining for Option A, year $TRAINING_START_YEAR..."
+          python train_models.py --option a
           echo "Training complete."
 
-      # ── Commit best_model.json back to repo for reference ───────────
-      - name: Commit model info to GitHub
-        if: >
-          github.event.schedule == '0 4 * * 0' ||
-          github.event.inputs.run_training == 'true'
+      - name: Commit best model info to GitHub (Option A)
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          mkdir -p artifacts
-          git add artifacts/best_model.json || true
-          git diff --staged --quiet || git commit -m "Update best model info [$(date +%Y-%m-%d)]"
+          # artifacts/option_a/best_model.json is saved during training
+          git add artifacts/option_a/best_model.json || true
+          git diff --staged --quiet || git commit -m "Update Option A best model info [$(date +%Y-%m-%d)]"
+          git push || echo "Push failed — HF upload already succeeded"
+
+  # ── Weekly or manual: full retraining Option B ─────────────────
+  train-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    needs: update-data
+    if: >
+      github.event.schedule == '0 4 * * 0' ||
+      github.event.inputs.run_training == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train Option B
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2012' }}
+        run: |
+          echo "Starting retraining for Option B, year $TRAINING_START_YEAR..."
+          python train_models.py --option b
+          echo "Training complete."
+
+      - name: Commit best model info to GitHub (Option B)
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add artifacts/option_b/best_model.json || true
+          git diff --staged --quiet || git commit -m "Update Option B best model info [$(date +%Y-%m-%d)]"
           git push || echo "Push failed — HF upload already succeeded"
