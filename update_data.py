@@ -1,6 +1,7 @@
 """
 update_data.py - Daily incremental update script with Stooq fallback.
 Fetches new data since last update, using Yahoo Finance first, then Stooq if needed.
+Now uses ALL_TICKERS from config.py to include both Option A and Option B.
 """
 import os
 import json
@@ -12,10 +13,12 @@ import requests
 from fredapi import Fred
 from datetime import datetime, timedelta
 from huggingface_hub import HfApi, hf_hub_download, CommitOperationAdd
+from config import ALL_TICKERS   # <-- new import
 
 # --- Configuration ---
 HF_DATASET_REPO = "P2SAMAPA/etf-entropy-dataset"
-ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "HYG", "VCIT", "LQD", "AGG", "SPY"]
+# Use ALL_TICKERS instead of hardcoded list
+ETF_LIST = ALL_TICKERS
 LOCAL_DATA_FILE = "raw_data.parquet"
 LOCAL_META_FILE = "metadata.json"
 
