@@ -225,6 +225,7 @@ def main():
         data_dict = data_dict,
         price_df  = price_df,
         tbill_df  = tbill_df,
+        artifact_path = artifact_dir,
     )
 
     total = round(time.time() - t0, 1)
