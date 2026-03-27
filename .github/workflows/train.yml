@@ -1,5 +1,4 @@
 name: ETF Entropy Pipeline
-
 on:
   schedule:
     # Daily data update: Mon-Fri at 8pm EST (1am UTC next day)
@@ -23,8 +22,8 @@ on:
         type: string
 
 jobs:
-  # ── Daily incremental data update ──────────────────────────────
-  update-data:
+  # ── Data update (common) ───────────────────────────────────────────────────
+  data-update:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -45,19 +44,11 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python update_data.py
 
-      - name: Upload logs (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: update-logs
-          path: "*.log"
-          retention-days: 7
-
-  # ── Weekly or manual: full retraining Option A ─────────────────
-  train-a:
+  # ── Training Option A (FI/Commodities) ─────────────────────────────────────
+  train-option-a:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
-    needs: update-data
+    timeout-minutes: 120
+    needs: [data-update]
     if: >
       github.event.schedule == '0 4 * * 0' ||
       github.event.inputs.run_training == 'true'
@@ -79,24 +70,15 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2012' }}
         run: |
-          echo "Starting retraining for Option A, year $TRAINING_START_YEAR..."
+          echo "Training Option A for year $TRAINING_START_YEAR..."
           python train_models.py --option a
-          echo "Training complete."
+          echo "Option A training complete."
 
-      - name: Commit best model info to GitHub (Option A)
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          # artifacts/option_a/best_model.json is saved during training
-          git add artifacts/option_a/best_model.json || true
-          git diff --staged --quiet || git commit -m "Update Option A best model info [$(date +%Y-%m-%d)]"
-          git push || echo "Push failed — HF upload already succeeded"
-
-  # ── Weekly or manual: full retraining Option B ─────────────────
-  train-b:
+  # ── Training Option B (Equity Sectors) ─────────────────────────────────────
+  train-option-b:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
-    needs: update-data
+    timeout-minutes: 120
+    needs: [data-update]
     if: >
       github.event.schedule == '0 4 * * 0' ||
       github.event.inputs.run_training == 'true'
@@ -118,14 +100,27 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2012' }}
         run: |
-          echo "Starting retraining for Option B, year $TRAINING_START_YEAR..."
+          echo "Training Option B for year $TRAINING_START_YEAR..."
           python train_models.py --option b
-          echo "Training complete."
+          echo "Option B training complete."
 
-      - name: Commit best model info to GitHub (Option B)
+  # ── Commit model info to GitHub (optional) ────────────────────────────────
+  commit-model-info:
+    runs-on: ubuntu-latest
+    needs: [train-option-a, train-option-b]
+    if: always() && !cancelled() && (needs.train-option-a.result == 'success' || needs.train-option-b.result == 'success')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Git user
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add artifacts/option_b/best_model.json || true
-          git diff --staged --quiet || git commit -m "Update Option B best model info [$(date +%Y-%m-%d)]"
+
+      - name: Commit best_model.json files if they exist
+        run: |
+          mkdir -p artifacts/option_a artifacts/option_b
+          git add artifacts/option_a/best_model.json artifacts/option_b/best_model.json || true
+          git diff --staged --quiet || git commit -m "Update best model info [$(date +%Y-%m-%d)]"
           git push || echo "Push failed — HF upload already succeeded"
