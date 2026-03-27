@@ -125,36 +125,40 @@ def _year_run_dates(option: str) -> dict:
 def _load_model_for_year(start_year: int, option: str):
     local_dir = f"artifacts/{option}/year_{start_year}"
     os.makedirs(local_dir, exist_ok=True)
+
+    # Load metadata first to get best_ma_window
     if option == 'a':
         meta_path = hf_hub_download(
             repo_id=HF_REPO,
             filename=f"models/year_{start_year}/best_model.json",
             repo_type="dataset", local_dir=local_dir,
         )
+        model_path_pattern = f"models/year_{start_year}/transfer_voting_MA{{best_ma}}.pkl"
     else:
         meta_path = hf_hub_download(
             repo_id=HF_REPO,
             filename=f"models/year_{start_year}/option_b/best_model.json",
             repo_type="dataset", local_dir=local_dir,
         )
+        model_path_pattern = f"models/year_{start_year}/option_b/transfer_voting_MA{{best_ma}}.pkl"
+
     with open(meta_path) as f:
         model_info = json.load(f)
     best_ma = model_info["best_ma_window"]
-    if option == 'a':
-        model_path = hf_hub_download(
-            repo_id=HF_REPO,
-            filename=f"models/year_{start_year}/transfer_voting_MA{best_ma}.pkl",
-            repo_type="dataset", local_dir=local_dir,
-        )
-    else:
-        model_path = hf_hub_download(
-            repo_id=HF_REPO,
-            filename=f"models/year_{start_year}/option_b/transfer_voting_MA{best_ma}.pkl",
-            repo_type="dataset", local_dir=local_dir,
-        )
-    model = TransferVotingModel(etf_list=[], best_ma_window=best_ma, artifact_dir=local_dir)
+
+    # Download the model file using the actual best_ma value
+    model_path = hf_hub_download(
+        repo_id=HF_REPO,
+        filename=model_path_pattern.format(best_ma=best_ma),
+        repo_type="dataset", local_dir=local_dir,
+    )
+
+    # Instantiate the model using positional arguments (etf_list, ma_window, artifact_dir)
+    # The etf_list is not needed for loading; we pass an empty list.
+    model = TransferVotingModel([], best_ma, local_dir)
     model.load(model_path)
-    # Override etf_list with the correct option's ETF list
+
+    # Optionally set the ETF list for the model (though it may already have it from the loaded state)
     model.etf_list = OPTION_A_ETFS if option == 'a' else OPTION_B_ETFS
     return model, model_info
 
