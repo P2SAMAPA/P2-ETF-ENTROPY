@@ -1,9 +1,11 @@
 """
 reseed.py - ONE-TIME script to build complete dataset from 2008.
 Uses Yahoo Finance first, falls back to Stooq if YF fails.
+Now fetches all ETFs (both Option A and Option B) using ALL_TICKERS from config.py.
 Run manually: python reseed.py
 """
 import os
+import sys
 import json
 import time
 import random
@@ -14,9 +16,17 @@ from fredapi import Fred
 from datetime import datetime, timedelta
 from huggingface_hub import HfApi, CommitOperationAdd
 
+# Import config to get all tickers
+try:
+    from config import ALL_TICKERS, OPTION_A_ETFS, OPTION_B_ETFS
+except ImportError:
+    print("ERROR: config.py not found. Please create it with ALL_TICKERS defined.")
+    sys.exit(1)
+
 # --- Configuration ---
 HF_DATASET_REPO = "P2SAMAPA/etf-entropy-dataset"
-ETF_LIST = ["TLT", "VNQ", "GLD", "SLV", "HYG", "VCIT", "LQD", "AGG", "SPY"]
+# Use ALL_TICKERS from config instead of hardcoded list
+ETF_LIST = ALL_TICKERS
 START_DATE = "2008-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
 
@@ -119,6 +129,7 @@ def fetch_etf_data_stooq(ticker, start, end):
 def main():
     print("=" * 60)
     print("FULL RESEED FROM 2008-01-01 (with Stooq fallback)")
+    print(f"Tickers: {ETF_LIST}")
     print("=" * 60)
     
     # 1. Fetch ETF data
