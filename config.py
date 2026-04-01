@@ -5,7 +5,7 @@ OPTION_A_ETFS = ["TLT", "LQD", "HYG", "VNQ", "GLD", "SLV"]
 
 # Option B: Equity Sectors (new)
 OPTION_B_ETFS = [
-    "SPY", "QQQ", "XLK", "XLF", "XLE", "XLV",
+    "QQQ", "XLK", "XLF", "XLE", "XLV",
     "XLI", "XLY", "XLP", "XLU", "GDX", "XME"
 ]
 
