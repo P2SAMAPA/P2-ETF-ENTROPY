@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Training script for GitHub Actions.
-Reads TRAINING_START_YEAR env var (set by train.yml).
+Reads TRAINING_START_YEAR env var (default 2008) and optionally TRAINING_END_YEAR.
+If TRAINING_END_YEAR is set, trains for each year from START to END inclusive.
 Saves artifacts to models/year_XXXX/ (or models/year_XXXX/option_b/ for Option B)
 in HF dataset, stamped with run date.
 Skips upload if a model for this year was already run today.
@@ -106,16 +107,16 @@ def delete_old_stamped_files(api, token: str, start_year: int, run_date: str,
         print(f"  ⚠️  Cleanup failed (non-fatal): {e}")
 
 
-def upload_artifacts_to_hf(artifact_path: str, token: str,
+def upload_artifacts_to_hf(local_artifact_dir: str, token: str,
                             start_year: int, run_date: str, option: str):
-    """Upload all artifact files to HuggingFace under models/year_XXXX/ (or /option_b/)."""
+    """Upload all artifact files from local_artifact_dir to HuggingFace under models/year_XXXX/ (or /option_b/)."""
     print("\n📤 Uploading artifacts to HuggingFace...")
     api = HfApi(token=token)
 
     patterns = [
-        f"{artifact_path}/*.pkl",
-        f"{artifact_path}/*.json",
-        f"{artifact_path}/*.npy",
+        f"{local_artifact_dir}/*.pkl",
+        f"{local_artifact_dir}/*.json",
+        f"{local_artifact_dir}/*.npy",
     ]
     files = []
     for pattern in patterns:
@@ -173,36 +174,44 @@ def main():
 
     t0 = time.time()
 
-    start_year_str = os.getenv("TRAINING_START_YEAR", "2012")
+    start_year_str = os.getenv("TRAINING_START_YEAR", "2008")   # changed default from 2012 to 2008
     try:
         start_year = int(start_year_str)
     except ValueError:
         raise RuntimeError(f"Invalid TRAINING_START_YEAR: '{start_year_str}'")
 
+    end_year_str = os.getenv("TRAINING_END_YEAR")
+    end_year = None
+    if end_year_str:
+        try:
+            end_year = int(end_year_str)
+        except ValueError:
+            raise RuntimeError(f"Invalid TRAINING_END_YEAR: '{end_year_str}'")
+        if end_year < start_year:
+            raise RuntimeError(f"TRAINING_END_YEAR ({end_year}) must be >= start_year ({start_year})")
+        print(f"Training range: {start_year} -> {end_year}")
+    else:
+        print(f"Training single year: {start_year}")
+
     if _EST:
         run_date = datetime.datetime.now(_EST).strftime('%Y-%m-%d')
     else:
         run_date = datetime.date.today().isoformat()
-    print(f"Starting retraining — option={option}, start_year={start_year}, run_date={run_date}")
+    print(f"Starting retraining — option={option}, run_date={run_date}")
 
     token = os.getenv("HF_TOKEN")
     if not token:
         raise RuntimeError("HF_TOKEN environment variable not set")
 
-    if already_trained_today(token, start_year, option):
-        sys.exit(0)
-
+    # Load data once (same for all years)
     df = load_dataset()
     print(f"Dataset shape: {df.shape}  ({df.index[0].date()} → {df.index[-1].date()})")
 
     # Select ETF list based on option
     if option == 'a':
         etf_list = OPTION_A_ETFS
-        artifact_dir = "artifacts"          # keep original path for Option A
     else:
         etf_list = OPTION_B_ETFS
-        artifact_dir = "artifacts/option_b"
-        os.makedirs(artifact_dir, exist_ok=True)
 
     required = etf_list + ["3MTBILL"]
     missing  = [c for c in required if c not in df.columns]
@@ -212,44 +221,63 @@ def main():
     price_df = df[etf_list].copy()
     tbill_df = df["3MTBILL"].copy()
 
-    data_dict = {}
-    for ma in MA_WINDOWS:
-        print(f"\nPreparing features MA({ma}) …")
-        t = time.time()
-        # Pass the ETF list to prepare_all_features
-        data_dict[ma] = prepare_all_features(df, ma_window=ma, year_start=start_year, etf_list=etf_list)
-        print(f"  MA({ma}) features ready in {round(time.time()-t,1)}s")
+    # Determine years to train
+    if end_year is None:
+        years_to_train = [start_year]
+    else:
+        years_to_train = list(range(start_year, end_year + 1))
 
-    best_ma, results = optimize_ma_window(
-        etf_list  = etf_list,
-        data_dict = data_dict,
-        price_df  = price_df,
-        tbill_df  = tbill_df,
-        artifact_path = artifact_dir,
-    )
+    for year in years_to_train:
+        print(f"\n{'='*60}")
+        print(f"Training for year {year} (option {option})")
+        print(f"{'='*60}")
+
+        if already_trained_today(token, year, option):
+            continue
+
+        # Create year-specific artifact directory
+        if option == 'a':
+            artifact_dir = f"artifacts/year_{year}"
+        else:
+            artifact_dir = f"artifacts/option_b/year_{year}"
+        os.makedirs(artifact_dir, exist_ok=True)
+
+        data_dict = {}
+        for ma in MA_WINDOWS:
+            print(f"\nPreparing features MA({ma}) …")
+            t = time.time()
+            data_dict[ma] = prepare_all_features(df, ma_window=ma, year_start=year, etf_list=etf_list)
+            print(f"  MA({ma}) features ready in {round(time.time()-t,1)}s")
+
+        best_ma, results = optimize_ma_window(
+            etf_list  = etf_list,
+            data_dict = data_dict,
+            price_df  = price_df,
+            tbill_df  = tbill_df,
+            artifact_path = artifact_dir,
+        )
+
+        # Enrich best_model.json with year, run date, and option
+        best_model_path = os.path.join(artifact_dir, "best_model.json")
+        if os.path.exists(best_model_path):
+            with open(best_model_path) as f:
+                bm = json.load(f)
+            bm["start_year"]   = year
+            bm["run_date"]     = run_date
+            bm["last_trained"] = run_date
+            bm["option"]       = option
+            with open(best_model_path, "w") as f:
+                json.dump(bm, f, indent=2)
+
+        upload_artifacts_to_hf(artifact_dir, token, year, run_date, option)
+
+        print(f"  ✅ Year {year} complete (best MA: {best_ma})")
 
     total = round(time.time() - t0, 1)
     print(f"\n{'='*60}")
-    print(f"Training complete in {total}s  |  Best MA: MA({best_ma})  |  Year: {start_year} | Option: {option}")
-    for w, r in sorted(results.items()):
-        print(f"  MA({w}): val ann_return = {r*100:.2f}%")
+    print(f"All training complete in {total}s  |  Option: {option}")
+    print(f"Trained years: {years_to_train}")
     print("="*60)
-
-    # Enrich best_model.json with year, run date, and option
-    best_model_path = os.path.join(artifact_dir, "best_model.json")
-    if os.path.exists(best_model_path):
-        with open(best_model_path) as f:
-            bm = json.load(f)
-        bm["start_year"]   = start_year
-        bm["run_date"]     = run_date
-        bm["last_trained"] = run_date
-        bm["option"]       = option
-        with open(best_model_path, "w") as f:
-            json.dump(bm, f, indent=2)
-
-    upload_artifacts_to_hf(artifact_dir, token, start_year, run_date, option)
-
-    print("\nTraining complete.")
 
 
 if __name__ == "__main__":
