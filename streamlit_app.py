@@ -284,66 +284,34 @@ def render_option_tabs(option: str, etf_list: list, option_label: str):
     year_run_dates = _year_run_dates(option)
     today_utc = _today_utc()
 
-    # Sidebar controls (shared by both tabs)
+        # Sidebar controls - SIMPLIFIED (training controls removed)
     with st.sidebar:
         st.header(f"⚙️ {option_label} Controls")
-        tsl_pct     = st.slider("Trailing Stop Loss (%)",  10,  25,  12, key=f"tsl_{option}")
-        tx_cost     = st.slider("Transaction Cost (bps)",  10,  25,  12, key=f"tx_{option}")
-        z_threshold = st.slider("Z-Score Re-entry",      0.50, 2.00, 0.70, step=0.05, key=f"z_{option}")
-
+        
+        # Display hardcoded parameters (read-only info)
+        st.info(f"**Strategy Parameters (Hardcoded)**\n\n"
+                f"• Trailing Stop Loss: **{HARDCODED_TSL_PCT}%**\n"
+                f"• Transaction Cost: **{HARDCODED_TX_COST} bps**\n"
+                f"• Z-Score Re-entry: **{HARDCODED_Z_THRESHOLD}**")
+        
         st.markdown("---")
         st.subheader("📅 Model Status")
         if trained_years:
-            for yr in trained_years:
+            st.caption(f"Available years: {len(trained_years)} models")
+            # Show last 5 trained years with dates
+            recent_years = sorted(trained_years, reverse=True)[:5]
+            for yr in recent_years:
                 rd = year_run_dates.get(yr, "unknown")
                 tag = "✅ today" if rd == today_utc else f"🔄 {rd}"
                 st.caption(f"{yr}: {tag}")
+            if len(trained_years) > 5:
+                st.caption(f"... and {len(trained_years) - 5} more years")
         else:
-            st.warning("No trained years yet.")
-
-        # Years needing training
-        years_trained_today = [yr for yr in trained_years if year_run_dates.get(yr) == today_utc]
-        years_needing_train = [yr for yr in ALL_YEARS if yr not in years_trained_today]
+            st.warning("No trained models yet. Training runs weekly via GitHub Actions.")
 
         st.markdown("---")
-        st.header("🚀 Train / Refresh Years")
-        st.caption("Select 1–5 — all train in parallel (~30 mins).")
-        years_to_train = st.multiselect(
-            "Select years to train",
-            options=years_needing_train,
-            max_selections=5,
-            format_func=lambda y: (
-                f"{y}  🔄 retrain (last: {year_run_dates.get(y, '?')})"
-                if y in trained_years else f"{y}  ⬜ new"
-            ),
-            placeholder="Choose up to 5 years...",
-            key=f"train_{option}"
-        )
-        if st.button("🚀 Trigger Training", type="primary",
-                     disabled=len(years_to_train) == 0, key=f"trigger_{option}"):
-            ok_years, fail_years = [], []
-            for yr in years_to_train:
-                (ok_years if trigger_github_training(yr) else fail_years).append(yr)
-            if ok_years:
-                st.success(f"✅ Triggered: {ok_years}")
-                st.session_state[f"training_triggered_{option}"] = ok_years
-            if fail_years:
-                st.error(f"❌ Failed: {fail_years} — check GH_PAT secret")
-
-        if st.session_state.get(f"training_triggered_{option}"):
-            st.info(f"🔄 Training in progress for {st.session_state[f'training_triggered_{option}']}. Page refreshes every 30s.")
-
-    # Data refresh auto‑refresh
-    if st.session_state.get(f"training_triggered_{option}"):
-        st.markdown(
-            "<script>setTimeout(function(){window.location.reload();},30000);</script>",
-            unsafe_allow_html=True)
-
-    if not trained_years:
-        st.info(
-            f"No trained models yet for {option_label}. Use the sidebar to trigger training."
-        )
-        return
+        st.caption("Models are trained automatically every Saturday. "
+                   "Contact admin for manual retraining.")
 
     df_raw = _load_raw()
     tab1, tab2 = st.tabs(["📊 Single Year Deep-Dive", "🔍 Consensus Sweep"])
