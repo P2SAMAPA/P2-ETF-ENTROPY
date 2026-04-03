@@ -68,7 +68,7 @@ jobs:
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2012' }}
+          TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2008' }}
         run: |
           echo "Training Option A for year $TRAINING_START_YEAR..."
           python train_models.py --option a
