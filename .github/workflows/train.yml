@@ -6,20 +6,16 @@ on:
     # Weekly full retraining: Saturday at 11pm EST (4am UTC Sunday)
     - cron: '0 4 * * 0'
   workflow_dispatch:
+    # Manual trigger - trains all years 2008-2025 for both options
     inputs:
       run_training:
-        description: 'Run full retraining'
+        description: 'Run full retraining for all years (2008-2025)'
         required: false
-        default: 'false'
+        default: 'true'
         type: choice
         options:
           - 'true'
           - 'false'
-      start_year:
-        description: 'Start year for training (e.g. 2008, 2012, 2019)'
-        required: false
-        default: '2008'
-        type: string
 
 jobs:
   # ── Data update (common) ───────────────────────────────────────────────────
@@ -44,7 +40,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python update_data.py
 
-  # ── Training Option A (FI/Commodities) ─────────────────────────────────────
+  # ── Training Matrix: All Years 2008-2025 for Option A ────────────────────────
   train-option-a:
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -52,6 +48,10 @@ jobs:
     if: >
       github.event.schedule == '0 4 * * 0' ||
       github.event.inputs.run_training == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        year: [2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -64,17 +64,17 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      - name: Train Option A
+      - name: Train Option A - Year ${{ matrix.year }}
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2008' }}
+          TRAINING_START_YEAR: ${{ matrix.year }}
         run: |
-          echo "Training Option A for year $TRAINING_START_YEAR..."
+          echo "Training Option A for year ${{ matrix.year }}..."
           python train_models.py --option a
-          echo "Option A training complete."
+          echo "Option A training complete for year ${{ matrix.year }}."
 
-  # ── Training Option B (Equity Sectors) ─────────────────────────────────────
+  # ── Training Matrix: All Years 2008-2025 for Option B ────────────────────────
   train-option-b:
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -82,6 +82,10 @@ jobs:
     if: >
       github.event.schedule == '0 4 * * 0' ||
       github.event.inputs.run_training == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        year: [2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -94,15 +98,15 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      - name: Train Option B
+      - name: Train Option B - Year ${{ matrix.year }}
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          TRAINING_START_YEAR: ${{ github.event.inputs.start_year || '2012' }}
+          TRAINING_START_YEAR: ${{ matrix.year }}
         run: |
-          echo "Training Option B for year $TRAINING_START_YEAR..."
+          echo "Training Option B for year ${{ matrix.year }}..."
           python train_models.py --option b
-          echo "Option B training complete."
+          echo "Option B training complete for year ${{ matrix.year }}."
 
   # ── Commit model info to GitHub (optional) ────────────────────────────────
   commit-model-info:
