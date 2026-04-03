@@ -43,7 +43,10 @@ ETF_COLORS = {
     "XLU": "#17becf", "GDX": "#ffbb78", "XME": "#98df8a",
     "CASH": "#7f7f7f",
 }
-
+# HARDCODED STRATEGY PARAMETERS (removed from sidebar)
+HARDCODED_TSL_PCT = 12          # Trailing Stop Loss = 12%
+HARDCODED_TX_COST = 12          # Transaction Cost = 12 bps
+HARDCODED_Z_THRESHOLD = 0.70    # Z-Score Re-entry = 0.70
 
 # ── Helper functions (option‑aware) ────────────────────────────────────────────
 
@@ -167,8 +170,20 @@ def _load_model_for_year(start_year: int, option: str):
 def _load_raw():
     return load_dataset()
 
+def run_for_year(df_raw, model, model_info, year_start, option):
+    """
+    Run backtest for a specific year with HARDCODED strategy parameters.
+    TSL=12%, Transaction costs=12bps, Z-score=0.70
+    """
+    timings = {}
+    best_ma = model_info["best_ma_window"]
+    etf_list = OPTION_A_ETFS if option == 'a' else OPTION_B_ETFS
 
-def run_for_year(df_raw, model, model_info, year_start, tsl_pct, tx_cost, z_threshold, option):
+    # Use hardcoded parameters instead of sidebar inputs
+    tsl_pct = HARDCODED_TSL_PCT
+    tx_cost = HARDCODED_TX_COST
+    z_threshold = HARDCODED_Z_THRESHOLD
+
     timings = {}
     best_ma = model_info["best_ma_window"]
     etf_list = OPTION_A_ETFS if option == 'a' else OPTION_B_ETFS
