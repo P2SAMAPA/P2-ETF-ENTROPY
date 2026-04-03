@@ -29,7 +29,7 @@ st.set_page_config(page_title="ETF Transfer Voting Engine", page_icon="📈", la
 
 HF_REPO     = "P2SAMAPA/etf-entropy-dataset"
 GITHUB_REPO = "P2SAMAPA/P2-ETF-ENTROPY"
-ALL_YEARS   = list(range(2008, 2025))
+ALL_YEARS   = list(range(2008, 2026))
 
 ETF_COLORS = {
     # Option A
