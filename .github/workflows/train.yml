@@ -18,7 +18,7 @@ on:
       start_year:
         description: 'Start year for training (e.g. 2008, 2012, 2019)'
         required: false
-        default: '2012'
+        default: '2008'
         type: string
 
 jobs:
