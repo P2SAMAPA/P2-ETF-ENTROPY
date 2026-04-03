@@ -342,9 +342,7 @@ def render_option_tabs(option: str, etf_list: list, option_label: str):
             with st.spinner(f"Computing — year={view_year}, MA({best_ma})..."):
                 (results, metrics, equity_oos,
                  timings, oos_start, oos_end,
-                 data_dict, predictions) = run_for_year(
-                    df_raw, model, model_info, view_year,
-                    tsl_pct, tx_cost, z_threshold, option)
+                 data_dict, predictions) = run_for_year(df_raw, model, model_info, view_year, option)
         except RuntimeError as e:
             if "MODEL_STALE" in str(e):
                 st.error("⚠️ Model is stale — retrain this year via sidebar.")
@@ -554,8 +552,7 @@ def render_option_tabs(option: str, etf_list: list, option_label: str):
             try:
                 m, mi = _load_model_for_year(yr, option)
                 (res, mets, eq_oos, _,
-                 oos_s, oos_e, dd, _) = run_for_year(
-                    df_raw, m, mi, yr, tsl_pct, tx_cost, z_threshold, option)
+                 oos_s, oos_e, dd, _) = run_for_year(df_raw, model, model_info, view_year, option)
 
                 if res is None or mets is None:
                     continue
