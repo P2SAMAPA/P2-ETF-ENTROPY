@@ -1,6 +1,6 @@
 """
 reseed.py - ONE-TIME script to build complete dataset from 2008.
-Uses Yahoo Finance first, falls back to Stooq if YF fails.
+Uses Yahoo Finance first (bulk batching + rate_limit=True), falls back to Stooq if YF fails.
 Now fetches all ETFs (both Option A and Option B) using ALL_TICKERS from config.py.
 Run manually: python reseed.py
 """
@@ -25,65 +25,18 @@ except ImportError:
 
 # --- Configuration ---
 HF_DATASET_REPO = "P2SAMAPA/etf-entropy-dataset"
-# Use ALL_TICKERS from config instead of hardcoded list
 ETF_LIST = ALL_TICKERS
 START_DATE = "2008-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
+BATCH_SIZE = 10  # Number of tickers per batch (adjust based on total count)
+BATCH_DELAY = 5  # Seconds between batches
+TICKER_DELAY = 1  # Seconds between individual fallback requests
 
 # Create a session with a browser-like user-agent to reduce rate limiting
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 })
-
-def fetch_etf_data_yf(ticker, start, end):
-    """Fetch ETF data from Yahoo Finance with robust retry logic."""
-    for attempt in range(6):
-        try:
-            df = yf.download(
-                ticker,
-                start=start,
-                end=end,
-                progress=False,
-                auto_adjust=True,
-                threads=False,
-                session=session
-            )
-            
-            if df.empty:
-                raise ValueError(f"No data for {ticker}")
-            
-            # Handle MultiIndex columns
-            if isinstance(df.columns, pd.MultiIndex):
-                df = df['Close']
-                if isinstance(df, pd.DataFrame):
-                    df = df.iloc[:, 0]
-            else:
-                close_cols = [c for c in df.columns if 'Close' in str(c)]
-                if close_cols:
-                    df = df[close_cols[0]]
-                else:
-                    df = df.iloc[:, 0]
-            
-            if isinstance(df, pd.DataFrame):
-                df = df.squeeze()
-            df.name = ticker
-            
-            print(f"  ✅ {ticker} (YF): {len(df)} rows")
-            return df
-            
-        except Exception as e:
-            err_str = str(e).lower()
-            is_rate_limit = any(k in err_str for k in ["rate limit", "too many requests", "429", "ratelimit"])
-            
-            if is_rate_limit and attempt < 5:
-                wait = 30 * (2 ** attempt) + random.randint(5, 15)
-                print(f"  ⚠️ YF rate limited on {ticker} (attempt {attempt+1}). Waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                print(f"  ❌ YF failed for {ticker} after {attempt+1} attempts: {e}")
-                return None
-    return None
 
 def fetch_etf_data_stooq(ticker, start, end):
     """
@@ -95,12 +48,10 @@ def fetch_etf_data_stooq(ticker, start, end):
     
     for attempt in range(3):
         try:
-            # Stooq returns CSV with columns: Date,Open,High,Low,Close,Volume
             df = pd.read_csv(url, parse_dates=['Date'], index_col='Date')
             if df.empty:
                 raise ValueError(f"No data from Stooq for {ticker}")
             
-            # Filter by date range (Stooq returns all available data)
             df = df.sort_index()
             mask = (df.index >= start) & (df.index <= end)
             df = df.loc[mask]
@@ -108,7 +59,6 @@ def fetch_etf_data_stooq(ticker, start, end):
             if df.empty:
                 raise ValueError(f"No data in date range for {ticker} from Stooq")
             
-            # Use Close price
             series = df['Close']
             series.name = ticker
             series.index = pd.to_datetime(series.index).tz_localize(None)
@@ -128,29 +78,92 @@ def fetch_etf_data_stooq(ticker, start, end):
 
 def main():
     print("=" * 60)
-    print("FULL RESEED FROM 2008-01-01 (with Stooq fallback)")
+    print("FULL RESEED FROM 2008-01-01 (with Stooq fallback & batching)")
     print(f"Tickers: {ETF_LIST}")
+    print(f"Batch size: {BATCH_SIZE}, delay between batches: {BATCH_DELAY}s")
     print("=" * 60)
     
-    # 1. Fetch ETF data
-    print(f"\n📥 Downloading ETFs ({START_DATE} to {END_DATE})...")
+    # 1. Fetch ETF data in batches
+    print(f"\n📥 Downloading ETFs in batches ({START_DATE} to {END_DATE})...")
     etf_data = {}
     failed_tickers = []
     
-    for ticker in ETF_LIST:
-        print(f"\n--- {ticker} ---")
-        # First try Yahoo Finance
-        series = fetch_etf_data_yf(ticker, START_DATE, END_DATE)
+    for batch_start_idx in range(0, len(ETF_LIST), BATCH_SIZE):
+        batch = ETF_LIST[batch_start_idx:batch_start_idx + BATCH_SIZE]
+        batch_num = batch_start_idx // BATCH_SIZE + 1
+        print(f"\n--- Batch {batch_num}: {batch} ---")
         
-        # If YF fails, try Stooq
-        if series is None:
-            print(f"  🔄 Trying Stooq fallback for {ticker}...")
-            series = fetch_etf_data_stooq(ticker, START_DATE, END_DATE)
+        # Attempt bulk download for the batch
+        df_batch = None
+        for attempt in range(3):
+            try:
+                df_batch = yf.download(
+                    batch,
+                    start=START_DATE,
+                    end=END_DATE,
+                    progress=False,
+                    auto_adjust=True,
+                    group_by='ticker',
+                    rate_limit=True,      # Built-in rate limiting
+                    threads=False,
+                    session=session
+                )
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                is_rate_limit = any(k in err_str for k in ["rate limit", "too many requests", "429", "ratelimit"])
+                if is_rate_limit and attempt < 2:
+                    wait = 30 * (2 ** attempt) + random.randint(5, 15)
+                    print(f"  ⚠️ Rate limited on batch {batch_num} (attempt {attempt+1}). Waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"  ❌ Batch {batch_num} failed after {attempt+1} attempts: {e}")
+                    df_batch = None
+                    break
         
-        if series is not None:
-            etf_data[ticker] = series
+        # If batch download failed, fall back to individual Stooq for each ticker in batch
+        if df_batch is None:
+            print(f"  🔄 Bulk download failed. Falling back to Stooq individually for each ticker in batch...")
+            for ticker in batch:
+                series = fetch_etf_data_stooq(ticker, START_DATE, END_DATE)
+                if series is not None:
+                    etf_data[ticker] = series
+                else:
+                    failed_tickers.append(ticker)
+                time.sleep(TICKER_DELAY)  # Delay between individual fallback requests
         else:
-            failed_tickers.append(ticker)
+            # Success: extract each ticker's Close price
+            for ticker in batch:
+                if ticker in df_batch.columns:
+                    # For multi-ticker download, structure is df_batch[ticker]['Close']
+                    if 'Close' in df_batch[ticker].columns:
+                        series = df_batch[ticker]['Close']
+                    else:
+                        series = df_batch[ticker]  # fallback
+                    series.name = ticker
+                    series = series.dropna()
+                    if len(series) > 0:
+                        etf_data[ticker] = series
+                        print(f"  ✅ {ticker}: {len(series)} rows")
+                    else:
+                        print(f"  ⚠️ {ticker} returned empty data, trying Stooq...")
+                        series = fetch_etf_data_stooq(ticker, START_DATE, END_DATE)
+                        if series is not None:
+                            etf_data[ticker] = series
+                        else:
+                            failed_tickers.append(ticker)
+                else:
+                    print(f"  ⚠️ {ticker} missing in batch response, trying Stooq...")
+                    series = fetch_etf_data_stooq(ticker, START_DATE, END_DATE)
+                    if series is not None:
+                        etf_data[ticker] = series
+                    else:
+                        failed_tickers.append(ticker)
+        
+        # Delay between batches to avoid rate limits
+        if batch_start_idx + BATCH_SIZE < len(ETF_LIST):
+            print(f"  ⏳ Waiting {BATCH_DELAY}s before next batch...")
+            time.sleep(BATCH_DELAY)
     
     if not etf_data:
         raise RuntimeError("No ETF data could be fetched from any source. Aborting.")
@@ -163,7 +176,7 @@ def main():
     print(f"\n📊 ETF DataFrame shape: {etf_df.shape}")
     print(f"   Date range: {etf_df.index[0].date()} to {etf_df.index[-1].date()}")
     
-    # 2. Fetch T-Bill data (unchanged)
+    # 2. Fetch T-Bill data from FRED
     print(f"\n📥 Downloading 3-Month T-Bill from FRED...")
     fred = Fred(api_key=os.getenv("FRED_API_KEY"))
     tbill = fred.get_series("DGS3MO", observation_start=START_DATE, observation_end=END_DATE)
