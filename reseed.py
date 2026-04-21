@@ -1,8 +1,9 @@
 """
 reseed.py - ONE-TIME script to build complete dataset from 2008.
-Uses Yahoo Finance with polite delays.
+Uses Yahoo Finance (primary) with Stooq fallback.
 Run LOCALLY (not on GitHub Actions) to avoid rate limiting.
 """
+
 import os
 import sys
 import json
@@ -13,6 +14,14 @@ import yfinance as yf
 from fredapi import Fred
 from datetime import datetime
 from huggingface_hub import HfApi, CommitOperationAdd
+
+# For Stooq fallback
+try:
+    import pandas_datareader.data as web
+    STOOQ_AVAILABLE = True
+except ImportError:
+    STOOQ_AVAILABLE = False
+    print("Warning: pandas_datareader not installed. Stooq fallback disabled.")
 
 # Import config to get all tickers
 try:
@@ -26,13 +35,43 @@ HF_DATASET_REPO = "P2SAMAPA/etf-entropy-dataset"
 ETF_LIST = ALL_TICKERS
 START_DATE = "2008-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
-DELAY_BETWEEN_TICKERS = random.uniform(3.0, 5.0)  # Longer delay for local runs
+DELAY_BETWEEN_TICKERS = random.uniform(3.0, 5.0)  # Base delay
+
+# User-Agent rotation (helps with some rate limits)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+]
+
+
+def fetch_etf_stooq(ticker, start, end):
+    """Fetch from Stooq (no rate limits, but sometimes missing tickers)."""
+    if not STOOQ_AVAILABLE:
+        return None
+    try:
+        # Stooq uses format like 'spy.us' for US ETFs
+        stooq_ticker = f"{ticker.lower()}.us"
+        df = web.DataReader(stooq_ticker, 'stooq', start, end)
+        if df.empty:
+            return None
+        # Stooq returns data in descending order, need to sort
+        df = df.sort_index()
+        series = df['Close']
+        series.name = ticker
+        print(f"  ✅ {ticker} via Stooq: {len(series)} rows")
+        return series
+    except Exception as e:
+        print(f"  ⚠️ Stooq fallback failed for {ticker}: {e}")
+        return None
 
 
 def fetch_etf_data_yf(ticker, start, end):
     """Fetch Close price from Yahoo Finance with exponential backoff."""
     for attempt in range(6):
         try:
+            # Rotate user agent (may help slightly)
+            session = yf.download if not hasattr(yf, 'set_tz_cache_location') else None
             df = yf.download(
                 ticker,
                 start=start,
@@ -61,7 +100,7 @@ def fetch_etf_data_yf(ticker, start, end):
             df.name = ticker
             df.index = pd.to_datetime(df.index).tz_localize(None)
 
-            print(f"  ✅ {ticker}: {len(df)} rows")
+            print(f"  ✅ {ticker} via Yahoo: {len(df)} rows")
             return df
 
         except Exception as e:
@@ -69,12 +108,29 @@ def fetch_etf_data_yf(ticker, start, end):
             is_rate_limit = any(k in err_str for k in ["rate limit", "too many requests", "429", "ratelimit"])
 
             if is_rate_limit and attempt < 5:
-                wait = 60 * (2 ** attempt) + random.randint(10, 30)  # Longer waits
+                wait = 60 * (2 ** attempt) + random.randint(10, 30)
                 print(f"  ⚠️ Rate limited on {ticker} (attempt {attempt+1}). Waiting {wait}s...")
                 time.sleep(wait)
             else:
-                print(f"  ❌ Failed for {ticker} after {attempt+1} attempts: {e}")
+                print(f"  ❌ Yahoo failed for {ticker}: {e}")
                 return None
+    return None
+
+
+def fetch_etf_with_fallback(ticker, start, end):
+    """Try Yahoo first, then Stooq."""
+    # Try Yahoo
+    series = fetch_etf_data_yf(ticker, start, end)
+    if series is not None:
+        return series
+
+    # Fallback to Stooq
+    print(f"  🔄 Falling back to Stooq for {ticker}...")
+    series = fetch_etf_stooq(ticker, start, end)
+    if series is not None:
+        return series
+
+    print(f"  ❌ All sources failed for {ticker}")
     return None
 
 
@@ -82,7 +138,7 @@ def main():
     print("=" * 60)
     print("FULL RESEED FROM 2008-01-01 (Run LOCALLY only)")
     print(f"Tickers: {ETF_LIST}")
-    print(f"Delay between tickers: {DELAY_BETWEEN_TICKERS:.1f} seconds")
+    print(f"Base delay: {DELAY_BETWEEN_TICKERS:.1f}s | Stooq fallback: {STOOQ_AVAILABLE}")
     print("=" * 60)
 
     # 1. Fetch ETF data
@@ -92,7 +148,7 @@ def main():
 
     for ticker in ETF_LIST:
         print(f"\n--- {ticker} ---")
-        series = fetch_etf_data_yf(ticker, START_DATE, END_DATE)
+        series = fetch_etf_with_fallback(ticker, START_DATE, END_DATE)
         if series is not None:
             etf_data[ticker] = series
         else:
@@ -107,7 +163,7 @@ def main():
         raise RuntimeError("No ETF data could be fetched. Aborting.")
 
     if failed_tickers:
-        print(f"\n⚠️ Failed tickers: {failed_tickers} — continuing with {len(etf_data)} tickers.")
+        print(f"\n⚠️ Failed tickers after all attempts: {failed_tickers} — continuing with {len(etf_data)} tickers.")
 
     # Combine into DataFrame
     etf_df = pd.DataFrame(etf_data)
@@ -147,7 +203,7 @@ def main():
         json.dump(metadata, f, indent=2)
     print(f"📝 Created metadata.json")
 
-    # 6. Upload to Hugging Face (optional – you can also do this manually)
+    # 6. Upload to Hugging Face (optional)
     print(f"\n📤 Uploading to Hugging Face: {HF_DATASET_REPO}")
     token = os.getenv("HF_TOKEN")
     if token:
