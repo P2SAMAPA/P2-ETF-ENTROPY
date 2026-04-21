@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 """
 reseed.py - ONE-TIME script to build complete dataset from 2008.
-Uses Yahoo Finance (primary) with Stooq fallback.
-**RUN THIS LOCALLY ON YOUR OWN MACHINE, NOT ON GITHUB ACTIONS.**
+Optimized for GitHub Actions with retries, Stooq fallback, and polite delays.
 """
 
 import os
@@ -21,8 +21,7 @@ try:
     STOOQ_AVAILABLE = True
 except ImportError:
     STOOQ_AVAILABLE = False
-    print("WARNING: pandas_datareader not installed. Stooq fallback will be disabled.")
-    print("Install it with: pip install pandas-datareader")
+    print("Warning: pandas_datareader not installed. Stooq fallback disabled.")
 
 # Import config to get all tickers
 try:
@@ -36,8 +35,8 @@ HF_DATASET_REPO = "P2SAMAPA/etf-entropy-dataset"
 ETF_LIST = ALL_TICKERS
 START_DATE = "2008-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
-BASE_DELAY = 5.0                     # Seconds between tickers (increase if still rate limited)
-MAX_RETRIES = 3                      # Retry attempts per ticker
+BASE_DELAY = 4.0                     # Seconds between tickers
+MAX_RETRIES = 4                      # Retry attempts per ticker
 
 
 def fetch_etf_stooq(ticker, start, end):
@@ -45,7 +44,6 @@ def fetch_etf_stooq(ticker, start, end):
     if not STOOQ_AVAILABLE:
         return None
     try:
-        # Stooq format for US ETFs: 'spy.us'
         stooq_ticker = f"{ticker.lower()}.us"
         df = web.DataReader(stooq_ticker, 'stooq', start, end)
         if df.empty:
@@ -62,7 +60,7 @@ def fetch_etf_stooq(ticker, start, end):
 
 def fetch_etf_data_yf(ticker, start, end):
     """Fetch Close price from Yahoo Finance with exponential backoff."""
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(1, MAX_RETRIES + 2):
         try:
             df = yf.download(
                 ticker,
@@ -99,17 +97,14 @@ def fetch_etf_data_yf(ticker, start, end):
             err_str = str(e).lower()
             is_rate_limit = any(k in err_str for k in ["rate limit", "too many requests", "429", "ratelimit"])
 
-            if is_rate_limit and attempt < MAX_RETRIES:
-                wait = 120 * (attempt + 1) + random.randint(30, 60)
-                print(f"  ⚠️ Rate limited on {ticker} (attempt {attempt+1}). Waiting {wait}s...")
-                time.sleep(wait)
-            elif attempt < MAX_RETRIES:
-                # Other errors: shorter wait then retry
-                wait = 10 * (attempt + 1)
-                print(f"  ⚠️ Error on {ticker}: {e}. Retrying in {wait}s...")
+            if attempt <= MAX_RETRIES:
+                wait = (30 * attempt) + random.randint(5, 15)
+                if is_rate_limit:
+                    wait = (90 * attempt) + random.randint(30, 60)
+                print(f"  ⚠️ {ticker} attempt {attempt} failed: {e}. Waiting {wait}s...")
                 time.sleep(wait)
             else:
-                print(f"  ❌ Yahoo failed for {ticker} after {MAX_RETRIES} attempts: {e}")
+                print(f"  ❌ Yahoo failed for {ticker} after {MAX_RETRIES} attempts.")
                 return None
     return None
 
@@ -132,10 +127,7 @@ def fetch_etf_with_fallback(ticker, start, end):
 
 def main():
     print("=" * 60)
-    print("FULL RESEED FROM 2008-01-01")
-    print("⚠️  WARNING: This script MUST be run on your LOCAL machine.")
-    print("   GitHub Actions IPs are aggressively rate‑limited by Yahoo Finance.")
-    print("=" * 60)
+    print("FULL RESEED FROM 2008-01-01 (GitHub Actions optimized)")
     print(f"Tickers: {ETF_LIST}")
     print(f"Base delay: {BASE_DELAY}s | Stooq fallback: {STOOQ_AVAILABLE}")
     print("=" * 60)
@@ -154,7 +146,7 @@ def main():
             failed_tickers.append(ticker)
 
         # Polite delay
-        delay = BASE_DELAY + random.uniform(-1.0, 2.0)
+        delay = BASE_DELAY + random.uniform(-0.5, 1.5)
         print(f"  ⏳ Waiting {delay:.1f}s before next ticker...")
         time.sleep(delay)
 
@@ -209,7 +201,7 @@ def main():
         json.dump(metadata, f, indent=2)
     print(f"📝 Created metadata.json")
 
-    # 6. Upload to Hugging Face (optional)
+    # 6. Upload to Hugging Face
     print(f"\n📤 Uploading to Hugging Face: {HF_DATASET_REPO}")
     token = os.getenv("HF_TOKEN")
     if token:
