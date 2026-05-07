@@ -4,7 +4,7 @@ on:
     # Daily data update: Mon-Fri at 8pm EST (1am UTC next day)
     - cron: '0 1 * * 2-6'
     # Weekly full retraining: Saturday at 11pm EST (4am UTC Sunday)
-    - cron: '0 4 * * 0'
+    - cron: '0 6 * * 0'
   workflow_dispatch:
     # Manual trigger - trains all years 2008-2025 for both options
     inputs:
