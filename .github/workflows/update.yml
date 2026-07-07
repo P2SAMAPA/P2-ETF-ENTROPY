@@ -3,7 +3,7 @@ name: Daily Data Update
 on:
   schedule:
     # Runs at 2:00 UTC every day – change as needed
-    - cron: '0 2 * * *'
+    - cron: '20 23 * * *'
   workflow_dispatch:  # also allow manual trigger
 
 jobs:
