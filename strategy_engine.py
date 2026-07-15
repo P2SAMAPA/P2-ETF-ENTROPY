@@ -47,10 +47,18 @@ class StrategyEngine:
                     and date in predictions_dict[etf].index
                     and date in price_df.index
                     and etf in price_df.columns):
-                pred  = predictions_dict[etf].loc[date]
-                price = price_df.loc[date, etf]
-                if pd.notna(pred) and pd.notna(price) and price > 0:
-                    expected[etf] = float(pred) / float(price) * 100.0
+                pred_val = predictions_dict[etf].loc[date]
+                price_val = price_df.loc[date, etf]
+                
+                # FIX: Ensure pred_val and price_val are scalars, not Series
+                if isinstance(pred_val, pd.Series):
+                    pred_val = pred_val.iloc[0] if len(pred_val) > 0 else np.nan
+                if isinstance(price_val, pd.Series):
+                    price_val = price_val.iloc[0] if len(price_val) > 0 else np.nan
+                
+                # FIX: Use pd.isna() which handles both scalars and arrays correctly
+                if pd.notna(pred_val) and pd.notna(price_val) and price_val > 0:
+                    expected[etf] = float(pred_val) / float(price_val) * 100.0
 
         if not expected:
             return None, 0.0, {}
@@ -77,6 +85,9 @@ class StrategyEngine:
             if prev_pos not in (None, "CASH"):
                 if date in price_df.index and prev_pos in price_df.columns:
                     price_today = price_df.loc[date, prev_pos]
+                    # FIX: Ensure price_today is a scalar
+                    if isinstance(price_today, pd.Series):
+                        price_today = price_today.iloc[0] if len(price_today) > 0 else np.nan
                     if pd.notna(price_today):
                         if self.peak_price is None:
                             self.peak_price = price_today
@@ -107,17 +118,24 @@ class StrategyEngine:
                 # No z-score gate. Just pick best ETF and go.
                 selected        = best_etf
                 self.in_cash    = False
-                self.peak_price = (price_df.loc[date, best_etf]
-                                   if date in price_df.index
-                                   and best_etf in price_df.columns else None)
+                price_val = (price_df.loc[date, best_etf]
+                             if date in price_df.index
+                             and best_etf in price_df.columns else None)
+                # FIX: Ensure price_val is a scalar
+                if isinstance(price_val, pd.Series):
+                    price_val = price_val.iloc[0] if len(price_val) > 0 else None
+                self.peak_price = price_val
                 switch_reason   = "TSL_REENTRY"
 
             elif prev_pos is None:
                 # ── 4. Initial entry ──────────────────────────────────────────
                 selected        = best_etf
-                self.peak_price = (price_df.loc[date, best_etf]
-                                   if date in price_df.index
-                                   and best_etf in price_df.columns else None)
+                price_val = (price_df.loc[date, best_etf]
+                             if date in price_df.index
+                             and best_etf in price_df.columns else None)
+                if isinstance(price_val, pd.Series):
+                    price_val = price_val.iloc[0] if len(price_val) > 0 else None
+                self.peak_price = price_val
                 switch_reason   = "INITIAL_ENTRY"
 
             elif best_etf != prev_pos:
@@ -127,9 +145,12 @@ class StrategyEngine:
                 gain_diff = best_ret - expected_dict.get(prev_pos, 0.0)
                 if gain_diff > self.transaction_cost * 0.1 * 100:
                     selected        = best_etf
-                    self.peak_price = (price_df.loc[date, best_etf]
-                                       if date in price_df.index
-                                       and best_etf in price_df.columns else None)
+                    price_val = (price_df.loc[date, best_etf]
+                                 if date in price_df.index
+                                 and best_etf in price_df.columns else None)
+                    if isinstance(price_val, pd.Series):
+                        price_val = price_val.iloc[0] if len(price_val) > 0 else None
+                    self.peak_price = price_val
                     switch_reason   = "BETTER_OPPORTUNITY"
 
             # ── Record ────────────────────────────────────────────────────────
