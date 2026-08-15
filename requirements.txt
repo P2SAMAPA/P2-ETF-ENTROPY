@@ -11,7 +11,7 @@ fastdtw==0.3.4
 pyarrow==18.1.0
 huggingface-hub==0.27.1
 pandas-market-calendars==4.5.1
-streamlit==1.41.1
+streamlit==1.61.1
 matplotlib==3.10.0
 altair==5.5.0
 plotly>=5.0.0
