@@ -159,10 +159,15 @@ def _load_model_for_year(start_year: int, option: str):
     # Instantiate the model using positional arguments (etf_list, ma_window, artifact_dir)
     # The etf_list is not needed for loading; we pass an empty list.
     model = TransferVotingModel([], best_ma, local_dir)
-    model.load(model_path)
+    model.load(model_path)  # The model loads its own saved etf_list
 
-    # Optionally set the ETF list for the model (though it may already have it from the loaded state)
-    model.etf_list = OPTION_A_ETFS if option == 'a' else OPTION_B_ETFS
+    # CRITICAL FIX: Do NOT override the model's etf_list with the current option's ETF list.
+    # The model must use the ETF list it was trained with to maintain dtw_weights dimensions.
+    # model.etf_list = OPTION_A_ETFS if option == 'a' else OPTION_B_ETFS  # <- REMOVED
+
+    # Optional: Print the loaded ETF list for debugging
+    print(f"Loaded model for year {start_year}, option {option} with etf_list: {model.etf_list}")
+
     return model, model_info
 
 
@@ -177,16 +182,14 @@ def run_for_year(df_raw, model, model_info, year_start, option):
     """
     timings = {}
     best_ma = model_info["best_ma_window"]
-    etf_list = OPTION_A_ETFS if option == 'a' else OPTION_B_ETFS
+    
+    # Use the model's own ETF list, not the global option lists
+    etf_list = model.etf_list
 
     # Use hardcoded parameters instead of sidebar inputs
     tsl_pct = HARDCODED_TSL_PCT
     tx_cost = HARDCODED_TX_COST
     z_threshold = HARDCODED_Z_THRESHOLD
-
-    timings = {}
-    best_ma = model_info["best_ma_window"]
-    etf_list = OPTION_A_ETFS if option == 'a' else OPTION_B_ETFS
 
     t = time.time()
     data_dict = prepare_all_features(df_raw, ma_window=best_ma, year_start=year_start, etf_list=etf_list)
@@ -284,7 +287,7 @@ def render_option_tabs(option: str, etf_list: list, option_label: str):
     year_run_dates = _year_run_dates(option)
     today_utc = _today_utc()
 
-        # Sidebar controls - SIMPLIFIED (training controls removed)
+    # Sidebar controls - SIMPLIFIED (training controls removed)
     with st.sidebar:
         st.header(f"⚙️ {option_label} Controls")
         
@@ -358,7 +361,7 @@ def render_option_tabs(option: str, etf_list: list, option_label: str):
 
         st.title(f"📈 {option_label} — Transfer Voting Engine")
         st.caption(
-            f"Transfer Voting · {len(etf_list)} ETFs · MA({best_ma}) · "
+            f"Transfer Voting · {len(model.etf_list)} ETFs · MA({best_ma}) · "
             f"Trained from {view_year} · Run: {run_date_display} · OOS: {oos_label}"
         )
 
@@ -368,7 +371,7 @@ def render_option_tabs(option: str, etf_list: list, option_label: str):
                 col.metric(lbl, f"{sec}s")
 
         with st.expander("📅 80/10/10 Split Details", expanded=False):
-            ref = next((e for e in etf_list if e in data_dict.get("split_dates", {})), None)
+            ref = next((e for e in model.etf_list if e in data_dict.get("split_dates", {})), None)
             if ref:
                 sd = data_dict["split_dates"][ref]
                 c1, c2, c3 = st.columns(3)
@@ -382,9 +385,9 @@ def render_option_tabs(option: str, etf_list: list, option_label: str):
         with col_sig:
             st.subheader("📡 Next Allocation")
             X_latest = {etf: data_dict["features"][etf].iloc[-1:]
-                        for etf in etf_list if etf in data_dict.get("features", {})}
+                        for etf in model.etf_list if etf in data_dict.get("features", {})}
             exp_returns = {}
-            for etf in etf_list:
+            for etf in model.etf_list:
                 if etf not in X_latest:
                     continue
                 try:
@@ -467,262 +470,4 @@ def render_option_tabs(option: str, etf_list: list, option_label: str):
         st.plotly_chart(fig_eq, use_container_width=True)
 
         st.markdown("---")
-        st.subheader("📊 Allocation Breakdown (OOS)")
-        audit = results.get("audit_trail", pd.DataFrame())
-        if not audit.empty and oos_start:
-            audit_oos = audit.loc[audit.index >= oos_start]
-            if not audit_oos.empty and "selected_etf" in audit_oos.columns:
-                counts = audit_oos["selected_etf"].value_counts()
-                col_pie, col_tbl = st.columns([1, 2])
-                with col_pie:
-                    fig_pie = go.Figure(go.Pie(
-                        labels=counts.index, values=counts.values,
-                        marker_colors=[ETF_COLORS.get(e, "#888") for e in counts.index],
-                        hole=0.4))
-                    fig_pie.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0),
-                                           paper_bgcolor="rgba(0,0,0,0)")
-                    st.plotly_chart(fig_pie, use_container_width=True)
-                with col_tbl:
-                    pct = (counts / counts.sum() * 100).round(1)
-                    st.dataframe(
-                        pct.rename("% Days").reset_index().rename(columns={"index": "ETF"}),
-                        hide_index=True, height=260)
-
-        st.markdown("---")
-        st.subheader("🗒️ OOS Trade Log  (last 20 entries)")
-        if not audit.empty and oos_start:
-            audit_oos = audit.loc[audit.index >= oos_start].copy()
-            audit_oos.index = pd.to_datetime(audit_oos.index).normalize().date
-            disp = audit_oos.tail(20).copy()
-            if "actual_return" in disp.columns:
-                disp["return_%"] = disp["actual_return"].apply(
-                    lambda x: f"{x*100:.4f}%" if pd.notna(x) else "—")
-            if "expected_return" in disp.columns:
-                disp["exp_ret_%"] = disp["expected_return"].apply(
-                    lambda x: f"{x:.4f}%" if pd.notna(x) and x != 0 else "—")
-            if "signal_z" in disp.columns:
-                disp["z_score"] = disp["signal_z"].apply(
-                    lambda x: f"{x:.2f}" if pd.notna(x) else "—")
-            if "switch_reason" in disp.columns:
-                disp["reason"] = disp["switch_reason"].apply(
-                    lambda x: x if x and x != "" else "—")
-            if "switch_flag" in disp.columns:
-                disp["switch"] = disp["switch_flag"].apply(lambda x: "✅" if x else "")
-            if "in_cash" in disp.columns:
-                disp["cash"] = disp["in_cash"].apply(lambda x: "CASH" if x else "")
-            display_cols = [c for c in
-                            ["selected_etf", "return_%", "exp_ret_%",
-                             "z_score", "switch", "reason", "cash"]
-                            if c in disp.columns]
-            st.dataframe(disp[display_cols], use_container_width=True, height=400)
-        else:
-            st.info("No trade data available.")
-
-        st.markdown("---")
-        st.caption(
-            f"P2-ETF-ENTROPY · Transfer Voting · MA({best_ma}) · "
-            f"Trained from {view_year} · Run: {run_date_display} · "
-            f"OOS: {oos_label} · Entropy 2026, 28, 84"
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # TAB 2: Consensus Sweep
-    # ─────────────────────────────────────────────────────────────────────────
-    with tab2:
-        st.title(f"🔍 {option_label} — Consensus Sweep")
-
-        if len(trained_years) < 2:
-            st.info(
-                f"Need at least 2 trained years for consensus sweep. "
-                f"Use the sidebar to trigger training for more years."
-            )
-            return
-
-        st.caption(
-            f"Comparing {len(trained_years)} trained year-models: {trained_years}. "
-            f"Strategy controls from sidebar apply to all."
-        )
-
-        sweep_rows    = []
-        equity_traces = {}
-
-        progress = st.progress(0, text="Loading sweep data...")
-        for i, yr in enumerate(trained_years):
-            progress.progress(i / len(trained_years), text=f"Running year {yr}...")
-            try:
-                m, mi = _load_model_for_year(yr, option)
-                (res, mets, eq_oos, _,
-                 oos_s, oos_e, dd, _) = run_for_year(df_raw, model, model_info, view_year, option)
-
-                if res is None or mets is None:
-                    continue
-
-                # Next allocation for this year's model
-                X_lat = {etf: dd["features"][etf].iloc[-1:]
-                         for etf in etf_list if etf in dd.get("features", {})}
-                er = {}
-                for etf in etf_list:
-                    if etf not in X_lat:
-                        continue
-                    try:
-                        pred  = m.predict_single_etf(
-                            X_lat[etf], etf, source_feature_dict=X_lat)[0]
-                        price = float(df_raw[etf].iloc[-1])
-                        er[etf] = pred / price * 100.0 if price > 0 else 0.0
-                    except Exception:
-                        er[etf] = 0.0
-                next_pick = max(er, key=er.get) if er else "N/A"
-
-                oos_lbl = f"{oos_s.date()} → {oos_e.date()}" if oos_s and oos_e else "N/A"
-
-                sweep_rows.append({
-                    "Start Year":      yr,
-                    "OOS Period":      oos_lbl,
-                    "Next Pick":       next_pick,
-                    "Ann. Return":     f"{mets.get('ann_return', 0)*100:.2f}%",
-                    "Sharpe":          f"{mets.get('sharpe', 0):.3f}",
-                    "Max DD":          f"{mets.get('max_dd', 0)*100:.2f}%",
-                    "Calmar":          f"{mets.get('calmar', 0):.2f}",
-                    "Win Rate":        f"{mets.get('win_rate', 0)*100:.1f}%",
-                    "Sortino":         f"{mets.get('sortino', 0):.3f}",
-                    "Volatility":      f"{mets.get('volatility', 0)*100:.2f}%",
-                    "Avg Hold Days":   mets.get("avg_hold_days", "N/A"),
-                    "# Switches":      mets.get("n_switches", "N/A"),
-                    "_ann_return_raw": mets.get("ann_return", 0),
-                    "_sharpe_raw":     mets.get("sharpe", 0),
-                })
-
-                if eq_oos is not None:
-                    eq_s = (eq_oos["strategy"]
-                            if isinstance(eq_oos, pd.DataFrame)
-                            and "strategy" in eq_oos.columns else eq_oos)
-                    equity_traces[yr] = eq_s
-
-            except Exception as e:
-                st.warning(f"Year {yr} skipped: {e}")
-
-        progress.progress(1.0, text="Done.")
-
-        if not sweep_rows:
-            st.error("Could not load any year models.")
-            return
-
-        # Consensus signal
-        st.markdown("---")
-        all_picks     = [r["Next Pick"] for r in sweep_rows]
-        pick_counts   = pd.Series(all_picks).value_counts()
-        top_pick      = pick_counts.index[0]
-        top_count     = int(pick_counts.iloc[0])
-        consensus_pct = top_count / len(all_picks) * 100
-
-        c1, c2, c3 = st.columns(3)
-        etf_color = ETF_COLORS.get(top_pick, "#333")
-        c1.markdown(
-            f"<div style='padding:16px;border-radius:10px;"
-            f"background:{etf_color}22;border-left:5px solid {etf_color};'>"
-            f"<span style='font-size:1.8rem;font-weight:700;color:{etf_color}'>"
-            f"{top_pick}</span><br>"
-            f"<span style='color:#888;font-size:0.85rem'>Consensus Next Allocation</span>"
-            f"</div>", unsafe_allow_html=True)
-        c2.metric("Consensus Strength",
-                  f"{consensus_pct:.0f}%",
-                  f"{top_count}/{len(all_picks)} year-models agree")
-        c3.metric("Models Compared", len(sweep_rows))
-
-        st.caption("Vote breakdown: " + "  |  ".join(
-            f"{etf}: {cnt}" for etf, cnt in pick_counts.items()))
-
-        # Metrics table
-        st.markdown("---")
-        st.subheader("📊 OOS Metrics by Start Year")
-        display_cols = ["Start Year", "OOS Period", "Next Pick",
-                        "Ann. Return", "Sharpe", "Max DD", "Calmar",
-                        "Win Rate", "Sortino", "Volatility",
-                        "Avg Hold Days", "# Switches"]
-        st.dataframe(
-            pd.DataFrame(sweep_rows)[display_cols],
-            hide_index=True, use_container_width=True, height=400)
-
-        # Equity overlay
-        st.markdown("---")
-        st.subheader("📉 OOS Equity Curves — All Years (normalised to 1.0)")
-        colors_cycle = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-                        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-                        "#bcbd22", "#17becf", "#aec7e8", "#ffbb78",
-                        "#98df8a", "#ff9896", "#c5b0d5"]
-        fig_sweep = go.Figure()
-        for idx, (yr, eq_s) in enumerate(sorted(equity_traces.items())):
-            eq_norm = eq_s / eq_s.iloc[0]
-            fig_sweep.add_trace(go.Scatter(
-                x=eq_norm.index, y=eq_norm.values,
-                name=f"From {yr}",
-                line=dict(color=colors_cycle[idx % len(colors_cycle)], width=1.8),
-            ))
-        fig_sweep.update_layout(
-            height=420, xaxis_title="Date", yaxis_title="Normalised Value (start=1.0)",
-            legend=dict(orientation="h", y=1.02),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            margin=dict(l=0, r=0, t=30, b=0))
-        fig_sweep.update_xaxes(showgrid=True, gridcolor="#eee")
-        fig_sweep.update_yaxes(showgrid=True, gridcolor="#eee")
-        st.plotly_chart(fig_sweep, use_container_width=True)
-
-        # Sharpe bar chart
-        st.markdown("---")
-        st.subheader("📊 Sharpe Ratio by Start Year")
-        sharpe_vals = [r["_sharpe_raw"] for r in sweep_rows]
-        sharpe_yrs  = [r["Start Year"] for r in sweep_rows]
-        fig_sharpe  = go.Figure(go.Bar(
-            x=[str(y) for y in sharpe_yrs], y=sharpe_vals,
-            marker_color=["#2ca02c" if v > 0 else "#d62728" for v in sharpe_vals],
-            text=[f"{v:.2f}" for v in sharpe_vals], textposition="outside",
-        ))
-        fig_sharpe.update_layout(
-            height=300, xaxis_title="Start Year", yaxis_title="Sharpe Ratio",
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig_sharpe, use_container_width=True)
-
-        st.markdown("---")
-        st.caption(
-            f"P2-ETF-ENTROPY · Consensus Sweep · {len(sweep_rows)} year-models · "
-            f"Entropy 2026, 28, 84"
-        )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN: top-level tabs for Option A and Option B
-# ══════════════════════════════════════════════════════════════════════════════
-
-def main():
-    st.sidebar.title("📈 ETF Entropy Engine")
-
-    # Data management (shared)
-    st.sidebar.header("🔄 Data Management")
-    metadata = load_metadata()
-    if metadata:
-        st.sidebar.info(f"Data updated: **{metadata.get('last_data_update', '?')}**")
-        if metadata.get("last_training_date"):
-            st.sidebar.caption(f"Last trained: {metadata['last_training_date']}")
-    else:
-        st.sidebar.warning("Metadata not found")
-
-    if st.sidebar.button("🔄 Refresh Dataset"):
-        with st.spinner("Updating dataset..."):
-            incremental_update()
-            st.cache_data.clear()
-        st.sidebar.success("Dataset refreshed ✅")
-        st.rerun()
-
-    # Top-level tab selection
-    tab_a, tab_b = st.tabs(["🌊 Option A — Fixed Income / Commodities", "📈 Option B — Equity Sectors"])
-
-    with tab_a:
-        render_option_tabs('a', OPTION_A_ETFS, "Option A")
-
-    with tab_b:
-        render_option_tabs('b', OPTION_B_ETFS, "Option B")
-
-
-if __name__ == "__main__":
-    main()
+        st.subheader("📊
