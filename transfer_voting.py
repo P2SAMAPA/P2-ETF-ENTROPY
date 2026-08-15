@@ -120,7 +120,20 @@ class TransferVotingModel:
         if target_etf not in self.base_models:
             raise ValueError(f"No model for {target_etf}")
 
+        if target_etf not in self.etf_list:
+            raise ValueError(f"{target_etf} not in etf_list: {self.etf_list}")
+
         target_idx = self.etf_list.index(target_etf)
+
+        # Validate dtw_weights dimensions
+        if self.dtw_weights is not None:
+            if target_idx >= len(self.dtw_weights):
+                raise IndexError(
+                    f"target_idx={target_idx} out of range for dtw_weights "
+                    f"with shape {self.dtw_weights.shape}. "
+                    f"etf_list length: {len(self.etf_list)}, "
+                    f"dtw_weights shape: {self.dtw_weights.shape}"
+                )
 
         if self.dtw_weights is None:
             return self._simple_voting_pred(target_etf, X)
@@ -131,6 +144,10 @@ class TransferVotingModel:
         for j, source_etf in enumerate(self.etf_list):
             if source_etf == target_etf:
                 continue  # exclude self per Eq.22
+
+            # Skip if j is out of bounds for dtw_weights
+            if j >= self.dtw_weights.shape[1]:
+                continue
 
             w = self.dtw_weights[target_idx, j]
             if w <= 0:
@@ -177,6 +194,20 @@ class TransferVotingModel:
         self.base_models = state["base_models"]
         self.dtw_weights = state["dtw_weights"]
         self.is_fitted   = state["is_fitted"]
+        
+        # Validate dtw_weights dimensions and rebuild if mismatched
+        if self.dtw_weights is not None:
+            n = len(self.etf_list)
+            if self.dtw_weights.shape != (n, n):
+                print(f"WARNING: dtw_weights shape {self.dtw_weights.shape} doesn't match etf_list length {n}. Rebuilding...")
+                # Rebuild with correct dimensions
+                new_weights = np.zeros((n, n))
+                min_rows = min(self.dtw_weights.shape[0], n)
+                min_cols = min(self.dtw_weights.shape[1], n)
+                new_weights[:min_rows, :min_cols] = self.dtw_weights[:min_rows, :min_cols]
+                self.dtw_weights = new_weights
+                print(f"  Rebuilt dtw_weights with shape {self.dtw_weights.shape}")
+        
         return self
 
 
